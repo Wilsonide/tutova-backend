@@ -1,0 +1,43 @@
+import uuid
+from datetime import datetime
+from typing import Literal
+
+from pydantic import BaseModel, ConfigDict, Field
+
+from app.domain.verification.models.tutor_verification import (
+    VerificationStatus,
+)
+
+IdentityDocumentType = Literal[
+    "NATIONAL_ID",
+    "PASSPORT",
+    "DRIVERS_LICENSE",
+    "OTHER_APPROVED_ID",
+]
+
+
+class VerificationSubmission(BaseModel):
+    identity_document_type: IdentityDocumentType
+    accept_nda: bool
+
+
+class VerificationStatusResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    status: VerificationStatus
+    nda_version: str | None
+    nda_accepted_at: datetime | None
+    submitted_at: datetime | None
+    reviewed_at: datetime | None
+    review_notes: str | None
+
+
+class AdminVerificationResponse(VerificationStatusResponse):
+    tutor_user_id: uuid.UUID
+    identity_document_type: str | None
+
+
+class VerificationReviewRequest(BaseModel):
+    decision: Literal["APPROVED", "REJECTED", "CHANGES_REQUESTED"]
+    review_notes: str | None = Field(default=None, max_length=3000)
