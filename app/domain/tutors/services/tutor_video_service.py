@@ -7,12 +7,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.cloudinary_service import (
     ALLOWED_VIDEO_CONTENT_TYPES,
     MAX_INTRO_VIDEO_SIZE,
+    create_tutor_video_upload_signature,
     delete_tutor_video,
+    finalize_tutor_video_upload,
     get_tutor_video_url,
     tutor_video_public_id,
     upload_tutor_video,
 )
 from app.domain.authentication.models.user import User, UserRole
+from app.domain.tutors.models.tutor_profile import TutorProfile
 from app.domain.tutors.repositories.tutor_repository import TutorRepository
 from app.domain.verification.models.tutor_verification import (
     TutorVerification,
@@ -32,6 +35,95 @@ class TutorVideoService:
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Only tutors can manage introduction videos.",
             )
+
+    async def create_upload_signature(self, user: User) -> dict:
+        if user.role != UserRole.TUTOR:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Only tutors can upload introduction videos.",
+            )
+
+        tutor_profile = await self.db.scalar(
+            select(TutorProfile).where(TutorProfile.user_id == user.id)
+        )
+
+        if not tutor_profile:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Create your tutor profile before uploading an introduction video.",
+            )
+
+        try:
+            return create_tutor_video_upload_signature(str(user.id))
+        except Exception as exc:
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail="Could not prepare the video upload.",
+            ) from exc
+
+    async def complete_upload(
+        self,
+        user: User,
+        temporary_public_id: str,
+    ) -> str:
+        if user.role != UserRole.TUTOR:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Only tutors can upload introduction videos.",
+            )
+
+        tutor_profile = await self.db.scalar(
+            select(TutorProfile).where(TutorProfile.user_id == user.id)
+        )
+
+        if not tutor_profile:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Create your tutor profile before uploading an introduction video.",
+            )
+
+        expected_prefix = f"tutova/tutor-introductions/{user.id}/pending-"
+
+        if not temporary_public_id.startswith(expected_prefix):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid introduction video upload.",
+            )
+
+        try:
+            permanent_public_id = finalize_tutor_video_upload(
+                temporary_public_id,
+                str(user.id),
+            )
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=str(exc),
+            ) from exc
+        except Exception as exc:
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail="Could not verify or finalize the uploaded video.",
+            ) from exc
+
+        verification = await self.db.scalar(
+            select(TutorVerification)
+            .where(TutorVerification.tutor_user_id == user.id)
+            .with_for_update()
+        )
+
+        if not verification:
+            verification = TutorVerification(
+                tutor_user_id=user.id,
+                status=VerificationStatus.NOT_SUBMITTED,
+            )
+            self.db.add(verification)
+
+        verification.introduction_video_key = permanent_public_id
+
+        await self.db.flush()
+
+        return get_tutor_video_url(permanent_public_id)
 
     async def upload(self, user: User, file: UploadFile) -> str:
         self._require_tutor(user)

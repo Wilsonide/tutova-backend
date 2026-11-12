@@ -169,3 +169,15 @@ class IdentityDocumentUploadResponse(BaseModel):
 class IdentityDocumentDownloadResponse(BaseModel):
     download_url: str
     expires_in_seconds: int
+
+
+class TutorVideoUploadSignatureResponse(BaseModel):
+    cloud_name: str
+    api_key: str
+    timestamp: int
+    signature: str
+    public_id: str
+
+
+class TutorVideoUploadCompleteRequest(BaseModel):
+    public_id: str = Field(min_length=1, max_length=500)

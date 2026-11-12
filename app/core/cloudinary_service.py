@@ -1,9 +1,11 @@
+import time
 import uuid
 from io import BytesIO
 
 import cloudinary
+import cloudinary.api
 import cloudinary.uploader
-from cloudinary.utils import cloudinary_url, private_download_url
+from cloudinary.utils import api_sign_request, cloudinary_url, private_download_url
 from fastapi import HTTPException, status
 
 from app.core.config import settings
@@ -147,6 +149,110 @@ def delete_tutor_profile_picture(public_id: str) -> None:
 
 def tutor_video_public_id(tutor_user_id: str) -> str:
     return f"tutova/tutor-introductions/{tutor_user_id}/introduction"
+
+
+def create_tutor_video_upload_signature(
+    tutor_user_id: str,
+) -> dict[str, str | int]:
+    """
+    Generate a signed direct-upload authorization for one temporary
+    introduction-video asset.
+
+    The API secret is used only on the backend and is never returned.
+    """
+    configure_cloudinary()
+
+    cloud_config = cloudinary.config()
+
+    if (
+        not cloud_config.cloud_name
+        or not cloud_config.api_key
+        or not cloud_config.api_secret
+    ):
+        raise RuntimeError("Cloudinary is not properly configured.")
+
+    timestamp = int(time.time())
+
+    public_id = f"tutova/tutor-introductions/{tutor_user_id}/pending-{uuid.uuid4().hex}"
+
+    params_to_sign = {
+        "timestamp": timestamp,
+        "public_id": public_id,
+    }
+
+    signature = api_sign_request(
+        params_to_sign,
+        cloud_config.api_secret,
+    )
+
+    return {
+        "cloud_name": cloud_config.cloud_name,
+        "api_key": cloud_config.api_key,
+        "timestamp": timestamp,
+        "signature": signature,
+        "public_id": public_id,
+    }
+
+
+def get_tutor_video_resource(public_id: str) -> dict:
+    """Retrieve a Cloudinary video asset for server-side validation."""
+    configure_cloudinary()
+
+    return cloudinary.api.resource(
+        public_id,
+        resource_type="video",
+    )
+
+
+def finalize_tutor_video_upload(
+    temporary_public_id: str,
+    tutor_user_id: str,
+) -> str:
+    """
+    Validate the uploaded temporary video and rename it to the
+    tutor's permanent introduction-video public ID.
+    """
+    configure_cloudinary()
+
+    expected_prefix = f"tutova/tutor-introductions/{tutor_user_id}/pending-"
+
+    if not temporary_public_id.startswith(expected_prefix):
+        raise ValueError("Invalid introduction video public ID.")
+
+    temporary_suffix = temporary_public_id.removeprefix(expected_prefix)
+
+    if not temporary_suffix or "/" in temporary_suffix:
+        raise ValueError("Invalid temporary introduction video ID.")
+
+    asset = get_tutor_video_resource(temporary_public_id)
+
+    if asset.get("resource_type") != "video":
+        raise ValueError("The uploaded asset is not a video.")
+
+    if asset.get("format", "").lower() not in {"mp4", "webm"}:
+        raise ValueError("Only MP4 and WebM videos are supported.")
+
+    file_size = int(asset.get("bytes") or 0)
+
+    if file_size <= 0 or file_size > MAX_INTRO_VIDEO_SIZE:
+        raise ValueError("Introduction video must not exceed 100 MB.")
+
+    duration = float(asset.get("duration") or 0)
+
+    if duration <= 0 or duration > MAX_INTRO_VIDEO_DURATION:
+        raise ValueError("Introduction video must not exceed 120 seconds.")
+
+    permanent_public_id = tutor_video_public_id(tutor_user_id)
+
+    cloudinary.uploader.rename(
+        temporary_public_id,
+        permanent_public_id,
+        resource_type="video",
+        overwrite=True,
+        invalidate=True,
+    )
+
+    return permanent_public_id
 
 
 def upload_tutor_video(file, tutor_user_id: str) -> dict:

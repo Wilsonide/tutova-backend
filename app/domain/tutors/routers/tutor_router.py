@@ -22,6 +22,8 @@ from app.domain.tutors.schemas.tutor import (
     TutorProfilePictureResponse,
     TutorProfileResponse,
     TutorProfileUpdate,
+    TutorVideoUploadCompleteRequest,
+    TutorVideoUploadSignatureResponse,
 )
 from app.domain.tutors.schemas.tutor_catalog import TutorCatalogSelection
 from app.domain.tutors.services.public_tutor_service import PublicTutorService
@@ -171,6 +173,43 @@ async def upload_introduction_video(
     video_url = await TutorVideoService(db).upload(
         current_user,
         file,
+    )
+
+    await db.commit()
+
+    return TutorVideoUploadResponse(
+        message="Introduction video uploaded successfully.",
+        introduction_video_url=video_url,
+    )
+
+
+@router.post(
+    "/profile/introduction-video/signature",
+    response_model=TutorVideoUploadSignatureResponse,
+)
+async def create_introduction_video_upload_signature(
+    current_user: RequireTutor,
+    db: DBSession,
+):
+    authorization = await TutorVideoService(db).create_upload_signature(
+        current_user,
+    )
+
+    return TutorVideoUploadSignatureResponse(**authorization)
+
+
+@router.post(
+    "/profile/introduction-video/complete",
+    response_model=TutorVideoUploadResponse,
+)
+async def complete_introduction_video_upload(
+    payload: TutorVideoUploadCompleteRequest,
+    current_user: RequireTutor,
+    db: DBSession,
+):
+    video_url = await TutorVideoService(db).complete_upload(
+        current_user,
+        payload.public_id,
     )
 
     await db.commit()
