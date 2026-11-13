@@ -43,6 +43,13 @@ class AdminTutorResponse(BaseModel):
     is_phone_verified: bool
     must_change_password: bool
     created_at: datetime
+    profile_completed: bool = False
+    missing_profile_fields: list[str] = Field(default_factory=list)
+
+    verification_completed: bool = False
+    missing_verification_fields: list[str] = Field(default_factory=list)
+
+    ready_for_verification: bool = False
 
     verification_status: VerificationStatus | None = None
     tutor_profile: AdminTutorProfileResponse | None = None

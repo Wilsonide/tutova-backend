@@ -1,5 +1,5 @@
 import uuid
-from typing import Annotated
+from typing import Annotated, Literal
 
 from fastapi import APIRouter, Query, status
 
@@ -26,6 +26,14 @@ async def list_tutors(
     db: DBSession,
     admin: RequireBookingAdmin,
     page: Annotated[int, Query(ge=1)] = 1,
+    profile_completion: Annotated[
+        Literal["complete", "incomplete"] | None,
+        Query(),
+    ] = None,
+    verification_completion: Annotated[
+        Literal["complete", "incomplete"] | None,
+        Query(),
+    ] = None,
     per_page: Annotated[int, Query(ge=1, le=100)] = 20,
     search: Annotated[str | None, Query(max_length=150)] = None,
     account_status: Annotated[
@@ -38,6 +46,8 @@ async def list_tutors(
         per_page=per_page,
         search=search,
         account_status=account_status,
+        profile_completion=profile_completion,
+        verification_completion=verification_completion,
     )
 
 
