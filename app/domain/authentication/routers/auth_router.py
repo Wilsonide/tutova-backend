@@ -30,24 +30,28 @@ REFRESH_COOKIE_PATH = "/api/v1/auth"
 
 
 def set_refresh_cookie(response: Response, refresh_token: str) -> None:
+    is_production = settings.ENVIRONMENT == "production"
+
     response.set_cookie(
         key=REFRESH_COOKIE_NAME,
         value=refresh_token,
         httponly=True,
-        secure=(settings.ENVIRONMENT == "production"),
-        samesite="lax",
-        max_age=(settings.REFRESH_TOKEN_DAYS * 24 * 60 * 60),
+        secure=is_production,
+        samesite="none" if is_production else "lax",
+        max_age=settings.REFRESH_TOKEN_DAYS * 24 * 60 * 60,
         path=REFRESH_COOKIE_PATH,
     )
 
 
 def clear_refresh_cookie(response: Response) -> None:
+    is_production = settings.ENVIRONMENT == "production"
+
     response.delete_cookie(
         key=REFRESH_COOKIE_NAME,
         path=REFRESH_COOKIE_PATH,
-        secure=settings.ENVIRONMENT == "production",
+        secure=is_production,
         httponly=True,
-        samesite="lax",
+        samesite="none" if is_production else "lax",
     )
 
 
