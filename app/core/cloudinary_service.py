@@ -1,3 +1,4 @@
+import logging
 import time
 import uuid
 from io import BytesIO
@@ -5,10 +6,17 @@ from io import BytesIO
 import cloudinary
 import cloudinary.api
 import cloudinary.uploader
-from cloudinary.utils import api_sign_request, cloudinary_url, private_download_url
+from cloudinary.utils import (
+    api_sign_request,
+    cloudinary_url,
+    private_download_url,
+)
 from fastapi import HTTPException, status
 
 from app.core.config import settings
+
+logger = logging.getLogger(__name__)
+
 
 MAX_INTRO_VIDEO_SIZE = 100 * 1024 * 1024
 MAX_INTRO_VIDEO_DURATION = 120
@@ -50,7 +58,10 @@ def configure_cloudinary() -> None:
     )
 
 
-def _validate_file_signature(content: bytes, content_type: str) -> bool:
+def _validate_file_signature(
+    content: bytes,
+    content_type: str,
+) -> bool:
     """Check the file's actual signature rather than trusting its MIME type."""
 
     if content_type == "application/pdf":
@@ -83,6 +94,7 @@ def upload_tutor_profile_picture(
     configure_cloudinary()
 
     allowed_extensions = ALLOWED_PROFILE_PICTURE_TYPES.get(content_type)
+
     if not allowed_extensions or not _validate_file_signature(content, content_type):
         raise HTTPException(
             status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
@@ -90,6 +102,7 @@ def upload_tutor_profile_picture(
         )
 
     extension = allowed_extensions[0]
+
     public_id = f"tutova/tutor-profile-pictures/{tutor_user_id}/{uuid.uuid4().hex}"
 
     try:
@@ -101,14 +114,19 @@ def upload_tutor_profile_picture(
             invalidate=True,
             format=extension,
         )
+
     except Exception as exc:
+        logger.exception("Cloudinary profile picture upload failed.")
+
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail="Could not upload the profile picture.",
         ) from exc
 
 
-def get_tutor_profile_picture_url(public_id: str | None) -> str | None:
+def get_tutor_profile_picture_url(
+    public_id: str | None,
+) -> str | None:
     if not public_id:
         return None
 
@@ -120,9 +138,11 @@ def get_tutor_profile_picture_url(public_id: str | None) -> str | None:
             resource_type="image",
             secure=True,
         )
+
         return url
 
     except Exception:
+        logger.exception("Could not generate profile picture URL.")
         return None
 
 
@@ -135,7 +155,10 @@ def delete_tutor_profile_picture(public_id: str) -> None:
             resource_type="image",
             invalidate=True,
         )
+
     except Exception as exc:
+        logger.exception("Cloudinary profile picture deletion failed.")
+
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail="Could not delete the profile picture from storage.",
@@ -143,7 +166,7 @@ def delete_tutor_profile_picture(public_id: str) -> None:
 
 
 # ---------------------------------------------------------------------
-# Tutor introduction videos: existing public video workflow
+# Tutor introduction videos: direct browser-to-Cloudinary workflow
 # ---------------------------------------------------------------------
 
 
@@ -155,11 +178,11 @@ def create_tutor_video_upload_signature(
     tutor_user_id: str,
 ) -> dict[str, str | int]:
     """
-    Generate a signed direct-upload authorization for one temporary
-    introduction-video asset.
+    Generate signed direct-upload authorization.
 
-    The API secret is used only on the backend and is never returned.
+    The API secret remains on the backend.
     """
+
     configure_cloudinary()
 
     cloud_config = cloudinary.config()
@@ -196,6 +219,7 @@ def create_tutor_video_upload_signature(
 
 def get_tutor_video_resource(public_id: str) -> dict:
     """Retrieve a Cloudinary video asset for server-side validation."""
+
     configure_cloudinary()
 
     return cloudinary.api.resource(
@@ -204,14 +228,81 @@ def get_tutor_video_resource(public_id: str) -> dict:
     )
 
 
+def _validate_tutor_video_asset(
+    asset: dict,
+    expected_public_id: str,
+) -> None:
+    """
+    Validate Cloudinary's actual asset metadata.
+
+    A missing duration is not treated as an overlength video.
+    """
+
+    if asset.get("public_id") != expected_public_id:
+        raise ValueError("The uploaded video does not match the authorized upload.")
+
+    resource_type = asset.get("resource_type")
+
+    if resource_type and resource_type != "video":
+        raise ValueError("The uploaded asset is not a video.")
+
+    file_format = str(asset.get("format") or "").lower()
+
+    if file_format not in {"mp4", "webm"}:
+        raise ValueError("Only MP4 and WebM videos are supported.")
+
+    try:
+        file_size = int(asset.get("bytes") or 0)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Could not determine the uploaded video file size.") from exc
+
+    if file_size <= 0:
+        raise ValueError("The uploaded video appears to be empty.")
+
+    if file_size > MAX_INTRO_VIDEO_SIZE:
+        raise ValueError("Introduction videos must not exceed 100 MB.")
+
+    raw_duration = asset.get("duration")
+
+    logger.info(
+        "Tutor introduction video metadata: "
+        "public_id=%s, format=%s, bytes=%s, "
+        "duration=%s, resource_type=%s",
+        asset.get("public_id"),
+        file_format,
+        file_size,
+        raw_duration,
+        resource_type,
+    )
+
+    # Do not interpret missing duration as zero or as an overlength video.
+    if raw_duration is None:
+        raise ValueError(
+            "Cloudinary has not returned the video duration yet. "
+            "Please try again shortly."
+        )
+
+    try:
+        duration = float(raw_duration)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Cloudinary returned an invalid video duration.") from exc
+
+    if duration <= 0:
+        raise ValueError("The uploaded video has an invalid duration.")
+
+    if duration > MAX_INTRO_VIDEO_DURATION:
+        raise ValueError("Introduction videos must not exceed 120 seconds.")
+
+
 def finalize_tutor_video_upload(
     temporary_public_id: str,
     tutor_user_id: str,
 ) -> str:
     """
-    Validate the uploaded temporary video and rename it to the
-    tutor's permanent introduction-video public ID.
+    Validate a temporary Cloudinary video and rename it
+    to the tutor's permanent introduction-video public ID.
     """
+
     configure_cloudinary()
 
     expected_prefix = f"tutova/tutor-introductions/{tutor_user_id}/pending-"
@@ -221,44 +312,70 @@ def finalize_tutor_video_upload(
 
     temporary_suffix = temporary_public_id.removeprefix(expected_prefix)
 
-    if not temporary_suffix or "/" in temporary_suffix:
+    if (
+        not temporary_suffix
+        or "/" in temporary_suffix
+        or len(temporary_suffix) != 32
+        or any(
+            character not in "0123456789abcdef"
+            for character in temporary_suffix.lower()
+        )
+    ):
         raise ValueError("Invalid temporary introduction video ID.")
 
-    asset = get_tutor_video_resource(temporary_public_id)
+    try:
+        asset = get_tutor_video_resource(temporary_public_id)
 
-    if asset.get("resource_type") != "video":
-        raise ValueError("The uploaded asset is not a video.")
+    except Exception as exc:
+        logger.exception(
+            "Could not retrieve temporary tutor video from Cloudinary. public_id=%s",
+            temporary_public_id,
+        )
 
-    if asset.get("format", "").lower() not in {"mp4", "webm"}:
-        raise ValueError("Only MP4 and WebM videos are supported.")
+        raise RuntimeError(
+            "Could not retrieve the uploaded video from Cloudinary. Please try again."
+        ) from exc
 
-    file_size = int(asset.get("bytes") or 0)
-
-    if file_size <= 0 or file_size > MAX_INTRO_VIDEO_SIZE:
-        raise ValueError("Introduction video must not exceed 100 MB.")
-
-    duration = float(asset.get("duration") or 0)
-
-    if duration <= 0 or duration > MAX_INTRO_VIDEO_DURATION:
-        raise ValueError("Introduction video must not exceed 120 seconds.")
+    _validate_tutor_video_asset(
+        asset,
+        temporary_public_id,
+    )
 
     permanent_public_id = tutor_video_public_id(tutor_user_id)
 
-    cloudinary.uploader.rename(
-        temporary_public_id,
-        permanent_public_id,
-        resource_type="video",
-        overwrite=True,
-        invalidate=True,
-    )
+    try:
+        cloudinary.uploader.rename(
+            temporary_public_id,
+            permanent_public_id,
+            resource_type="video",
+            overwrite=True,
+            invalidate=True,
+        )
+
+    except Exception as exc:
+        logger.exception(
+            "Could not finalize tutor introduction video. temporary_public_id=%s",
+            temporary_public_id,
+        )
+
+        raise RuntimeError("Could not finalize the introduction video.") from exc
 
     return permanent_public_id
 
 
-def upload_tutor_video(file, tutor_user_id: str) -> dict:
+# ---------------------------------------------------------------------
+# Legacy server-side video upload
+# ---------------------------------------------------------------------
+
+
+def upload_tutor_video(
+    file,
+    tutor_user_id: str,
+) -> dict:
     configure_cloudinary()
 
     final_public_id = tutor_video_public_id(tutor_user_id)
+
     temporary_public_id = (
         f"tutova/tutor-introductions/{tutor_user_id}/pending-{uuid.uuid4().hex}"
     )
@@ -274,13 +391,15 @@ def upload_tutor_video(file, tutor_user_id: str) -> dict:
         )
 
         duration = uploaded.get("duration")
-        if duration is not None and duration > MAX_INTRO_VIDEO_DURATION:
+
+        if duration is not None and float(duration) > MAX_INTRO_VIDEO_DURATION:
             cloudinary.uploader.destroy(
                 temporary_public_id,
                 resource_type="video",
             )
+
             raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
                 detail="Introduction videos must not exceed 2 minutes.",
             )
 
@@ -294,7 +413,10 @@ def upload_tutor_video(file, tutor_user_id: str) -> dict:
 
     except HTTPException:
         raise
+
     except Exception as exc:
+        logger.exception("Legacy Cloudinary introduction video upload failed.")
+
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail="Could not upload the introduction video.",
@@ -310,14 +432,19 @@ def delete_tutor_video(public_id: str) -> None:
             resource_type="video",
             invalidate=True,
         )
+
     except Exception as exc:
+        logger.exception("Cloudinary introduction video deletion failed.")
+
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail="Could not delete the introduction video.",
         ) from exc
 
 
-def get_tutor_video_url(public_id: str | None) -> str | None:
+def get_tutor_video_url(
+    public_id: str | None,
+) -> str | None:
     if not public_id:
         return None
 
@@ -329,9 +456,11 @@ def get_tutor_video_url(public_id: str | None) -> str | None:
             resource_type="video",
             secure=True,
         )
+
         return url
 
     except Exception:
+        logger.exception("Could not generate tutor introduction video URL.")
         return None
 
 
@@ -352,7 +481,7 @@ def upload_tutor_identity_document(
     if not allowed_extensions or not _validate_file_signature(content, content_type):
         raise HTTPException(
             status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
-            detail="Identity documents must be valid PDF, JPEG, or PNG files.",
+            detail=("Identity documents must be valid PDF, JPEG, or PNG files."),
         )
 
     extension = allowed_extensions[0]
@@ -380,7 +509,6 @@ def upload_tutor_identity_document(
         if not returned_public_id:
             raise RuntimeError("Cloudinary did not return a public_id.")
 
-        # Raw uploads may not include a separate format field.
         file_format = (uploaded.get("format") or extension).lower().lstrip(".")
 
         if file_format not in {"pdf", "jpg", "jpeg", "png"}:
@@ -394,13 +522,9 @@ def upload_tutor_identity_document(
 
     except HTTPException:
         raise
-    except Exception as exc:
-        # Log the actual exception server-side; never log document contents.
-        import logging
 
-        logging.getLogger(__name__).exception(
-            "Cloudinary identity document upload failed."
-        )
+    except Exception as exc:
+        logger.exception("Cloudinary identity document upload failed.")
 
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
@@ -421,8 +545,6 @@ def get_identity_document_download_url(
         )
 
     try:
-        import time
-
         expires_at = (
             int(time.time()) + settings.CLOUDINARY_IDENTITY_DOCUMENT_URL_TTL_SECONDS
         )
@@ -435,14 +557,19 @@ def get_identity_document_download_url(
             expires_at=expires_at,
             attachment=True,
         )
+
     except Exception as exc:
+        logger.exception("Could not generate identity document download URL.")
+
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail="Could not generate the secure document download link.",
         ) from exc
 
 
-def delete_tutor_identity_document(public_id: str) -> None:
+def delete_tutor_identity_document(
+    public_id: str,
+) -> None:
     configure_cloudinary()
 
     try:
@@ -452,7 +579,10 @@ def delete_tutor_identity_document(public_id: str) -> None:
             type="authenticated",
             invalidate=True,
         )
+
     except Exception as exc:
+        logger.exception("Cloudinary identity document deletion failed.")
+
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail="Could not delete the identity document from storage.",
