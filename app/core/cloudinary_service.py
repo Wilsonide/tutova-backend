@@ -218,14 +218,30 @@ def create_tutor_video_upload_signature(
 
 
 def get_tutor_video_resource(public_id: str) -> dict:
-    """Retrieve a Cloudinary video asset for server-side validation."""
+    """Retrieve complete Cloudinary video resource metadata."""
 
     configure_cloudinary()
 
-    return cloudinary.api.resource(
+    asset = cloudinary.api.resource(
         public_id,
         resource_type="video",
+        type="upload",
+        media_metadata=True,
     )
+
+    logger.info(
+        "Cloudinary video resource retrieved: "
+        "public_id=%s, keys=%s, duration=%s, "
+        "format=%s, bytes=%s, media_metadata=%s",
+        asset.get("public_id"),
+        list(asset.keys()),
+        asset.get("duration"),
+        asset.get("format"),
+        asset.get("bytes"),
+        asset.get("media_metadata"),
+    )
+
+    return asset
 
 
 def _validate_tutor_video_asset(
@@ -264,22 +280,18 @@ def _validate_tutor_video_asset(
 
     raw_duration = asset.get("duration")
 
-    logger.info(
-        "Tutor introduction video metadata: "
-        "public_id=%s, format=%s, bytes=%s, "
-        "duration=%s, resource_type=%s",
-        asset.get("public_id"),
-        file_format,
-        file_size,
-        raw_duration,
-        resource_type,
-    )
-
-    # Do not interpret missing duration as zero or as an overlength video.
     if raw_duration is None:
+        logger.error(
+            "Cloudinary video duration is missing. "
+            "public_id=%s, asset_keys=%s, media_metadata=%s",
+            expected_public_id,
+            list(asset.keys()),
+            asset.get("media_metadata"),
+        )
+
         raise ValueError(
-            "Cloudinary has not returned the video duration yet. "
-            "Please try again shortly."
+            "Cloudinary could not determine the video duration. "
+            "Please try uploading again."
         )
 
     try:
@@ -292,6 +304,13 @@ def _validate_tutor_video_asset(
 
     if duration > MAX_INTRO_VIDEO_DURATION:
         raise ValueError("Introduction videos must not exceed 120 seconds.")
+
+    logger.info(
+        "Tutor introduction video duration validated: "
+        "public_id=%s, duration=%.2f seconds",
+        expected_public_id,
+        duration,
+    )
 
 
 def finalize_tutor_video_upload(
