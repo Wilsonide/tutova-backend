@@ -2,6 +2,7 @@ import uuid
 from datetime import datetime, timezone
 
 from fastapi import HTTPException, status
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
@@ -11,6 +12,7 @@ from app.domain.verification.models.tutor_verification import (
     TutorVerification,
     VerificationStatus,
 )
+from app.domain.verification.models.tutor_referee import TutorReferee, RefereeStatus
 from app.domain.verification.repositories.verification_repository import (
     VerificationRepository,
 )
@@ -171,6 +173,21 @@ class VerificationService:
                 ),
             )
 
+        referees = list((await self.db.scalars(
+            select(TutorReferee).where(TutorReferee.tutor_user_id == user.id)
+        )).all())
+        invited_referees = [
+            referee for referee in referees if referee.invitation_sent_at is not None
+        ]
+        if len(invited_referees) < 2:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    "Submit at least two referee records and ensure their email "
+                    "invitations have been sent before submitting tutor verification."
+                ),
+            )
+
         if verification.status in (
             VerificationStatus.PENDING_REVIEW,
             VerificationStatus.APPROVED,
@@ -260,6 +277,24 @@ class VerificationService:
             )
 
         if data.decision == "APPROVED":
+            referee_records = list((await self.db.scalars(
+                select(TutorReferee).where(
+                    TutorReferee.tutor_user_id == verification.tutor_user_id
+                )
+            )).all())
+            consented_referees = [
+                referee for referee in referee_records
+                if referee.status == RefereeStatus.CONSENTED
+            ]
+            if len(consented_referees) < 2:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail=(
+                        "At least two referees must consent before this tutor "
+                        "application can be approved. Review the referee responses first."
+                    ),
+                )
+
             profile = await self.tutors.get_by_user_id_with_catalog(
                 verification.tutor_user_id
             )

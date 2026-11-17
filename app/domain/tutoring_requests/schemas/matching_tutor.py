@@ -14,7 +14,7 @@ class MatchingTutorResponse(BaseModel):
     last_name: str
 
     bio: str | None = None
-    hourly_rate: Decimal | None = None
+    monthly_fee: Decimal | None = None
     qualifications: str | None = None
     years_of_experience: int
 

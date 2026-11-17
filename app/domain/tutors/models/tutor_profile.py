@@ -25,8 +25,8 @@ class TutorProfile(Base, UUIDPrimaryKeyMixin, TimestampMixin):
 
     bio: Mapped[str | None] = mapped_column(Text, nullable=True)
 
-    # Tutor's public hourly rate in NGN. Payment amounts are converted to kobo.
-    hourly_rate: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True)
+    # Tutor's agreed monthly tutoring fee in NGN. Payments are stored in kobo.
+    monthly_fee: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True)
 
     qualifications: Mapped[str | None] = mapped_column(
         Text,

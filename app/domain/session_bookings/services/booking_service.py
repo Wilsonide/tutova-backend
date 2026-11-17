@@ -1,5 +1,5 @@
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import ROUND_HALF_UP, Decimal
 
 from fastapi import HTTPException, status
@@ -10,9 +10,14 @@ from app.domain.authentication.models.user import User
 from app.domain.notifications.models.notification import NotificationType
 from app.domain.notifications.services.notification_service import NotificationService
 from app.domain.payments.models.payment import Payment, PaymentStatus
+from app.domain.payments.services.payment_service import PaymentService
 from app.domain.session_bookings.models.lesson_booking import (
     BookingStatus,
     LessonBooking,
+)
+from app.domain.session_bookings.models.monthly_arrangement import (
+    MonthlyArrangementStatus,
+    MonthlyTutoringArrangement,
 )
 from app.domain.session_bookings.repositories.booking_repository import (
     BookingRepository,
@@ -188,27 +193,83 @@ class BookingService:
             )
 
         if (
-            locked_tutor.hourly_rate is None
-            or Decimal(str(locked_tutor.hourly_rate)) <= 0
+            locked_tutor.monthly_fee is None
+            or Decimal(str(locked_tutor.monthly_fee)) <= 0
         ):
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
-                detail=("The assigned tutor does not have a valid hourly rate."),
+                detail="The assigned tutor has not set a valid monthly tutoring fee.",
             )
 
-        hourly_rate = Decimal(str(locked_tutor.hourly_rate))
-
-        gross_amount_minor = int(
-            (
-                hourly_rate
-                * Decimal(100)
-                * Decimal(payload.duration_minutes)
-                / Decimal(60)
-            ).quantize(
-                Decimal("1"),
-                rounding=ROUND_HALF_UP,
+        monthly_fee = Decimal(str(locked_tutor.monthly_fee))
+        monthly_fee_minor = int(
+            (monthly_fee * Decimal(100)).quantize(
+                Decimal("1"), rounding=ROUND_HALF_UP
             )
         )
+
+        arrangement = None
+        if payload.monthly_arrangement_id:
+            arrangement = await self.db.scalar(
+                select(MonthlyTutoringArrangement)
+                .where(MonthlyTutoringArrangement.id == payload.monthly_arrangement_id)
+                .with_for_update()
+            )
+            if (
+                arrangement is None
+                or arrangement.requester_user_id != user.id
+                or arrangement.tutor_profile_id != locked_tutor.id
+                or arrangement.tutoring_request_id != request.id
+                or arrangement.status not in {
+                    MonthlyArrangementStatus.PENDING_PAYMENT,
+                    MonthlyArrangementStatus.ACTIVE,
+                }
+            ):
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="The selected tutoring arrangement is not available for this booking.",
+                )
+            if not (arrangement.period_start <= payload.start_at.date() <= arrangement.period_end):
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail="The lesson date must fall within the tutoring arrangement.",
+                )
+            monthly_fee_minor = arrangement.monthly_fee_minor
+            monthly_fee = Decimal(monthly_fee_minor) / Decimal(100)
+        else:
+            period_start = payload.start_at.date()
+            month_index = period_start.month - 1 + payload.contract_months
+            year = period_start.year + month_index // 12
+            month = month_index % 12 + 1
+            # Last day of the month immediately before the calculated anniversary.
+            next_month = date(year, month, 1)
+            period_end = next_month - timedelta(days=1)
+            duration_months = payload.contract_months
+            gross_amount_minor = monthly_fee_minor * duration_months
+            payment_policy = PaymentService(self.db)
+            completed_months_at_creation = await payment_policy._completed_booking_months(locked_tutor.id)
+            commission_bps = payment_policy._commission_bps(completed_months_at_creation)
+            platform_fee_minor = (gross_amount_minor * commission_bps + 5000) // 10000
+            tutor_earning_minor = gross_amount_minor - platform_fee_minor
+            arrangement = MonthlyTutoringArrangement(
+                tutoring_request_id=request.id,
+                tutor_profile_id=locked_tutor.id,
+                requester_user_id=user.id,
+                monthly_fee_minor=monthly_fee_minor,
+                duration_months=duration_months,
+                commission_bps=commission_bps,
+                platform_fee_minor=platform_fee_minor,
+                tutor_earning_minor=tutor_earning_minor,
+                completed_months_at_creation=completed_months_at_creation.quantize(Decimal("0.01")),
+                currency="NGN",
+                period_start=period_start,
+                period_end=period_end,
+                status=MonthlyArrangementStatus.PENDING_PAYMENT,
+            )
+            self.db.add(arrangement)
+            await self.db.flush()
+
+        gross_amount_minor = monthly_fee_minor * arrangement.duration_months
 
         if await self.bookings.has_tutor_conflict(
             tutor_profile_id=locked_tutor.id,
@@ -250,8 +311,9 @@ class BookingService:
             start_at=start_at,
             end_at=end_at,
             duration_minutes=payload.duration_minutes,
-            hourly_rate=hourly_rate,
+            monthly_fee=monthly_fee,
             gross_amount_minor=gross_amount_minor,
+            monthly_arrangement_id=arrangement.id,
             currency="NGN",
             status=BookingStatus.PENDING_TUTOR_CONFIRMATION,
             meeting_link=None,

@@ -1,5 +1,5 @@
 import uuid
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 
 from fastapi import HTTPException
@@ -14,7 +14,14 @@ from app.domain.session_bookings.models.lesson_booking import (
     BookingStatus,
     LessonBooking,
 )
+from app.domain.session_bookings.models.monthly_arrangement import (
+    MonthlyArrangementStatus,
+    MonthlyTutoringArrangement,
+)
 from app.domain.tutors.models.tutor_profile import TutorProfile
+
+
+TUTOVA_TIMEZONE = timezone(timedelta(hours=1))  # Nigeria West Africa Time (UTC+1)
 
 
 class PaymentService:
@@ -42,14 +49,62 @@ class PaymentService:
         )
 
     @staticmethod
-    def _commission_bps(completed_hours: Decimal) -> int:
-        # 0 hours = newly onboarded (25%); 0-50 completed hours = 20%;
-        # more than 50 completed hours = 15%. Exactly 50 remains at 20%.
-        if completed_hours <= 0:
+    def _commission_bps(completed_months: Decimal) -> int:
+        # New tutors: 25%; less than 3 completed booking-months: 20%;
+        # exactly 3 months and above: 15%.
+        if completed_months <= 0:
             return 2500
-        if completed_hours <= 50:
+        if completed_months < 3:
             return 2000
         return 1500
+
+    async def _completed_booking_months(self, tutor_profile_id: uuid.UUID) -> Decimal:
+        """Count months in fully completed contracts, with acknowledged lessons in every month."""
+        arrangements = list((await self.db.scalars(
+            select(MonthlyTutoringArrangement).where(
+                MonthlyTutoringArrangement.tutor_profile_id == tutor_profile_id,
+                MonthlyTutoringArrangement.status.in_([
+                    MonthlyArrangementStatus.ACTIVE,
+                    MonthlyArrangementStatus.COMPLETED,
+                ]),
+                MonthlyTutoringArrangement.period_end < datetime.now(TUTOVA_TIMEZONE).date(),
+            )
+        )).all())
+        completed_months = 0
+        for arrangement in arrangements:
+            arrangement_is_complete = True
+            for offset in range(arrangement.duration_months):
+                period_start, period_end = self._contract_month_window(arrangement, offset)
+                period_start_dt = datetime.combine(
+                    period_start, datetime.min.time(), tzinfo=TUTOVA_TIMEZONE
+                )
+                period_end_dt = datetime.combine(
+                    period_end + timedelta(days=1), datetime.min.time(), tzinfo=TUTOVA_TIMEZONE
+                )
+                lessons = list((await self.db.scalars(
+                    select(LessonBooking).where(
+                        LessonBooking.monthly_arrangement_id == arrangement.id,
+                        LessonBooking.start_at >= period_start_dt,
+                        LessonBooking.start_at < period_end_dt,
+                        LessonBooking.status.notin_([BookingStatus.CANCELLED, BookingStatus.DECLINED]),
+                    )
+                )).all())
+                if not lessons or any(
+                    lesson.status != BookingStatus.COMPLETED
+                    or lesson.learner_acknowledged_at is None
+                    or lesson.disputed_at is not None
+                    or (
+                        lesson.admin_review_required_at is not None
+                        and lesson.admin_reviewed_at is None
+                    )
+                    for lesson in lessons
+                ):
+                    arrangement_is_complete = False
+                    break
+            if arrangement_is_complete:
+                arrangement.status = MonthlyArrangementStatus.COMPLETED
+                completed_months += arrangement.duration_months
+        return Decimal(completed_months)
 
     async def initialize_booking_payment(
         self, user: User, booking_id: uuid.UUID, idempotency_key: str
@@ -113,18 +168,34 @@ class PaymentService:
             raise HTTPException(
                 status_code=409, detail="Only confirmed bookings can be paid."
             )
-        if booking.gross_amount_minor is None or booking.gross_amount_minor <= 0:
+        arrangement = None
+        if booking.monthly_arrangement_id is not None:
+            arrangement = await self.db.scalar(
+                select(MonthlyTutoringArrangement)
+                .where(MonthlyTutoringArrangement.id == booking.monthly_arrangement_id)
+                .with_for_update()
+            )
+            if arrangement is None:
+                raise HTTPException(status_code=409, detail="The tutoring arrangement could not be found.")
+            if arrangement.requester_user_id != user.id:
+                raise HTTPException(status_code=403, detail="You cannot pay for this arrangement.")
+            gross = arrangement.monthly_fee_minor * arrangement.duration_months
+        else:
+            gross = booking.gross_amount_minor or 0
+        if gross <= 0:
             raise HTTPException(
-                status_code=409, detail="This booking has no valid price snapshot."
+                status_code=409, detail="This booking has no valid monthly contract price."
             )
 
+        pending_query = select(Payment).where(
+            Payment.status == PaymentStatus.PENDING,
+        )
+        if arrangement is not None:
+            pending_query = pending_query.where(Payment.monthly_arrangement_id == arrangement.id)
+        else:
+            pending_query = pending_query.where(Payment.booking_id == booking.id)
         pending_payment = await self.db.scalar(
-            select(Payment)
-            .where(
-                Payment.booking_id == booking.id,
-                Payment.status == PaymentStatus.PENDING,
-            )
-            .order_by(Payment.created_at.desc())
+            pending_query.order_by(Payment.created_at.desc())
         )
         if pending_payment is not None:
             raise HTTPException(
@@ -132,11 +203,12 @@ class PaymentService:
                 detail=f"A payment is already awaiting completion. Retrieve payment {pending_payment.id} to reuse its checkout URL.",
             )
 
-        already_paid = await self.db.scalar(
-            select(Payment.id).where(
-                Payment.booking_id == booking.id, Payment.status == PaymentStatus.PAID
-            )
-        )
+        paid_query = select(Payment.id).where(Payment.status == PaymentStatus.PAID)
+        if arrangement is not None:
+            paid_query = paid_query.where(Payment.monthly_arrangement_id == arrangement.id)
+        else:
+            paid_query = paid_query.where(Payment.booking_id == booking.id)
+        already_paid = await self.db.scalar(paid_query)
         if already_paid:
             raise HTTPException(
                 status_code=409, detail="This booking has already been paid."
@@ -146,21 +218,20 @@ class PaymentService:
         if tutor is None:
             raise HTTPException(status_code=404, detail="Tutor profile not found.")
 
-        completed_minutes = await self.db.scalar(
-            select(func.coalesce(func.sum(LessonBooking.duration_minutes), 0)).where(
-                LessonBooking.tutor_profile_id == tutor.id,
-                LessonBooking.status == BookingStatus.COMPLETED,
-                LessonBooking.learner_acknowledged_at.is_not(None),
-            )
-        )
-        completed_hours = Decimal(completed_minutes or 0) / Decimal(60)
-        commission_bps = self._commission_bps(completed_hours)
-        gross = booking.gross_amount_minor
-        platform_fee = (gross * commission_bps + 5000) // 10000
-        tutor_earning = gross - platform_fee
+        if arrangement is not None:
+            completed_months = Decimal(arrangement.completed_months_at_creation)
+            commission_bps = arrangement.commission_bps
+            platform_fee = arrangement.platform_fee_minor
+            tutor_earning = arrangement.tutor_earning_minor
+        else:
+            completed_months = await self._completed_booking_months(tutor.id)
+            commission_bps = self._commission_bps(completed_months)
+            platform_fee = (gross * commission_bps + 5000) // 10000
+            tutor_earning = gross - platform_fee
 
         payment = Payment(
             booking_id=booking.id,
+            monthly_arrangement_id=arrangement.id if arrangement else None,
             requester_user_id=user.id,
             tutor_profile_id=tutor.id,
             provider=provider.name,
@@ -171,7 +242,8 @@ class PaymentService:
             commission_bps=commission_bps,
             platform_fee_minor=platform_fee,
             tutor_earning_minor=tutor_earning,
-            tutor_completed_hours_at_payment=completed_hours.quantize(Decimal("0.01")),
+            tutor_completed_hours_at_payment=Decimal("0"),
+            tutor_completed_months_at_payment=completed_months.quantize(Decimal("0.01")),
             status=PaymentStatus.PENDING,
         )
         self.db.add(payment)
@@ -227,6 +299,12 @@ class PaymentService:
         payment.status = PaymentStatus.PAID
         payment.paid_at = datetime.now(timezone.utc)
         payment.failure_reason = None
+        if payment.monthly_arrangement_id is not None:
+            arrangement = await self.db.get(MonthlyTutoringArrangement, payment.monthly_arrangement_id)
+            if arrangement is not None:
+                arrangement.status = MonthlyArrangementStatus.ACTIVE
+                arrangement.paid_at = payment.paid_at
+                arrangement.activated_at = payment.paid_at
         await self.db.commit()
         await self.db.refresh(payment)
         return payment
@@ -338,7 +416,27 @@ class PaymentService:
         await self.db.refresh(recipient)
         return recipient
 
-    async def request_payout(self, user: User, payment_id: uuid.UUID):
+    @staticmethod
+    def _contract_month_window(arrangement: MonthlyTutoringArrangement, offset: int):
+        month_index = arrangement.period_start.month - 1 + offset
+        year = arrangement.period_start.year + month_index // 12
+        month = month_index % 12 + 1
+        month_start = date(year, month, 1)
+        next_index = month_index + 1
+        next_year = arrangement.period_start.year + next_index // 12
+        next_month = next_index % 12 + 1
+        month_end = date(next_year, next_month, 1) - timedelta(days=1)
+        period_start = max(arrangement.period_start, month_start)
+        period_end = min(arrangement.period_end, month_end)
+        return period_start, period_end
+
+    async def request_payout(
+        self,
+        user: User,
+        payment_id: uuid.UUID,
+        *,
+        earning_period_start: date | None = None,
+    ):
         from app.domain.payments.models.payout import (
             PaymentRefund,
             PayoutRecipient,
@@ -358,20 +456,75 @@ class PaymentService:
         if payment is None or payment.tutor_profile_id != tutor.id:
             raise HTTPException(status_code=404, detail="Eligible payment not found.")
         if payment.status not in {PaymentStatus.PAID, PaymentStatus.PARTIALLY_REFUNDED}:
-            raise HTTPException(
-                status_code=409,
-                detail="Only successfully paid lessons can be paid out.",
+            raise HTTPException(status_code=409, detail="Only successfully paid contracts can be paid out.")
+
+        arrangement = None
+        payout_period_start = None
+        payout_period_end = None
+        if payment.monthly_arrangement_id is not None:
+            arrangement = await self.db.get(
+                MonthlyTutoringArrangement, payment.monthly_arrangement_id
             )
-        booking = await self.db.get(LessonBooking, payment.booking_id)
-        if (
-            booking is None
-            or booking.status != BookingStatus.COMPLETED
-            or booking.learner_acknowledged_at is None
-        ):
-            raise HTTPException(
-                status_code=409,
-                detail="Tutor earnings become payable after lesson completion and learner acknowledgement.",
+            if arrangement is None or earning_period_start is None:
+                raise HTTPException(
+                    status_code=422,
+                    detail="Select the completed contract month for this payout.",
+                )
+            valid_period = None
+            for offset in range(arrangement.duration_months):
+                window = self._contract_month_window(arrangement, offset)
+                if window[0] == earning_period_start:
+                    valid_period = window
+                    break
+            if valid_period is None:
+                raise HTTPException(status_code=422, detail="The selected payout month is not part of this contract.")
+            payout_period_start, payout_period_end = valid_period
+            if payout_period_end > datetime.now(TUTOVA_TIMEZONE).date():
+                raise HTTPException(status_code=409, detail="This month's tutor earnings are still being held until month-end.")
+
+            month_start_dt = datetime.combine(payout_period_start, datetime.min.time(), tzinfo=TUTOVA_TIMEZONE)
+            month_end_dt = datetime.combine(payout_period_end + timedelta(days=1), datetime.min.time(), tzinfo=TUTOVA_TIMEZONE)
+            lessons = list((await self.db.scalars(
+                select(LessonBooking).where(
+                    LessonBooking.monthly_arrangement_id == arrangement.id,
+                    LessonBooking.start_at >= month_start_dt,
+                    LessonBooking.start_at < month_end_dt,
+                    LessonBooking.status.notin_([BookingStatus.CANCELLED, BookingStatus.DECLINED]),
+                )
+            )).all())
+            if not lessons or any(
+                lesson.status != BookingStatus.COMPLETED
+                or lesson.learner_acknowledged_at is None
+                or lesson.disputed_at is not None
+                or (lesson.admin_review_required_at is not None and lesson.admin_reviewed_at is None)
+                for lesson in lessons
+            ):
+                raise HTTPException(
+                    status_code=409,
+                    detail="All lessons scheduled for this contract month must be completed, acknowledged and clear of unresolved review before payout.",
+                )
+            base_share, remainder = divmod(
+                payment.tutor_earning_minor, arrangement.duration_months
             )
+            month_offset = (payout_period_start.year - arrangement.period_start.year) * 12 + (
+                payout_period_start.month - arrangement.period_start.month
+            )
+            payable = base_share + (remainder if month_offset == arrangement.duration_months - 1 else 0)
+        else:
+            booking = await self.db.get(LessonBooking, payment.booking_id) if payment.booking_id else None
+            if (
+                booking is None
+                or booking.status != BookingStatus.COMPLETED
+                or booking.learner_acknowledged_at is None
+                or booking.disputed_at is not None
+                or booking.admin_review_required_at is not None
+            ):
+                raise HTTPException(
+                    status_code=409,
+                    detail="Tutor earnings become payable after lesson completion and learner acknowledgement.",
+                )
+            payable = payment.tutor_earning_minor
+
         recipient = await self.db.scalar(
             select(PayoutRecipient).where(
                 PayoutRecipient.tutor_profile_id == tutor.id,
@@ -379,49 +532,43 @@ class PaymentService:
             )
         )
         if recipient is None:
-            raise HTTPException(
-                status_code=409,
-                detail="Add and verify a bank account before requesting payout.",
-            )
-        existing = await self.db.scalar(
-            select(TutorPayout).where(TutorPayout.payment_id == payment.id)
-        )
+            raise HTTPException(status_code=409, detail="Add and verify a bank account before requesting payout.")
+
+        existing_query = select(TutorPayout).where(TutorPayout.payment_id == payment.id)
+        if payout_period_start is None:
+            existing_query = existing_query.where(TutorPayout.earning_period_start.is_(None))
+        else:
+            existing_query = existing_query.where(TutorPayout.earning_period_start == payout_period_start)
+        existing = await self.db.scalar(existing_query)
         if existing:
-            raise HTTPException(
-                status_code=409,
-                detail="A payout has already been requested for this lesson.",
+            raise HTTPException(status_code=409, detail="A payout has already been requested for this earning period.")
+
+        refunds = list((await self.db.scalars(
+            select(PaymentRefund).where(
+                PaymentRefund.payment_id == payment.id,
+                PaymentRefund.status != RefundStatus.FAILED,
             )
-        refunds = list(
-            (
-                await self.db.scalars(
-                    select(PaymentRefund).where(
-                        PaymentRefund.payment_id == payment.id,
-                        PaymentRefund.status != RefundStatus.FAILED,
-                    )
-                )
-            ).all()
-        )
-        if any(
-            refund.status in {RefundStatus.PENDING, RefundStatus.PROCESSING}
-            for refund in refunds
-        ):
-            raise HTTPException(
-                status_code=409, detail="A refund is being processed for this lesson."
-            )
+        )).all())
+        if any(refund.status in {RefundStatus.PENDING, RefundStatus.PROCESSING} for refund in refunds):
+            raise HTTPException(status_code=409, detail="A refund is being processed for this contract.")
         refunded_tutor_share = sum(
             refund.tutor_share_minor
             for refund in refunds
             if refund.status == RefundStatus.PROCESSED
         )
-        payable = payment.tutor_earning_minor - refunded_tutor_share
-        if payable <= 0:
-            raise HTTPException(
-                status_code=409,
-                detail="There are no tutor earnings available for this payment.",
+        if arrangement is not None and payment.tutor_earning_minor > 0:
+            refunded_tutor_share = (
+                refunded_tutor_share * payable // payment.tutor_earning_minor
             )
+        payable -= refunded_tutor_share
+        if payable <= 0:
+            raise HTTPException(status_code=409, detail="There are no tutor earnings available for this period.")
+
         payout = TutorPayout(
             tutor_profile_id=tutor.id,
             payment_id=payment.id,
+            earning_period_start=payout_period_start,
+            earning_period_end=payout_period_end,
             recipient_id=recipient.id,
             provider=payment.provider,
             provider_reference=f"tutova-payout-{uuid.uuid4().hex}",
@@ -602,63 +749,175 @@ class PaymentService:
         )
         if tutor_id is None:
             raise HTTPException(status_code=404, detail="Tutor profile not found.")
-        payments = list(
-            (
-                await self.db.scalars(
-                    select(Payment)
-                    .join(LessonBooking, Payment.booking_id == LessonBooking.id)
-                    .where(
-                        Payment.tutor_profile_id == tutor_id,
-                        Payment.status.in_(
-                            [PaymentStatus.PAID, PaymentStatus.PARTIALLY_REFUNDED]
-                        ),
-                        LessonBooking.status == BookingStatus.COMPLETED,
-                        LessonBooking.learner_acknowledged_at.is_not(None),
-                    )
-                    .order_by(Payment.paid_at.asc())
-                )
-            ).all()
-        )
+
+        payments = list((await self.db.scalars(
+            select(Payment).where(
+                Payment.tutor_profile_id == tutor_id,
+                Payment.status.in_([PaymentStatus.PAID, PaymentStatus.PARTIALLY_REFUNDED]),
+            ).order_by(Payment.paid_at.asc())
+        )).all())
         eligible = []
         for payment in payments:
-            payout = await self.db.scalar(
-                select(TutorPayout.id).where(TutorPayout.payment_id == payment.id)
-            )
-            if payout:
-                continue
-            refunds = list(
-                (
-                    await self.db.scalars(
-                        select(PaymentRefund).where(
-                            PaymentRefund.payment_id == payment.id,
-                            PaymentRefund.status != RefundStatus.FAILED,
-                        )
-                    )
-                ).all()
-            )
-            if any(
-                item.status in {RefundStatus.PENDING, RefundStatus.PROCESSING}
-                for item in refunds
-            ):
+            refunds = list((await self.db.scalars(
+                select(PaymentRefund).where(
+                    PaymentRefund.payment_id == payment.id,
+                    PaymentRefund.status != RefundStatus.FAILED,
+                )
+            )).all())
+            if any(refund.status in {RefundStatus.PENDING, RefundStatus.PROCESSING} for refund in refunds):
                 continue
             refunded_tutor_share = sum(
-                item.tutor_share_minor
-                for item in refunds
+                item.tutor_share_minor for item in refunds
                 if item.status == RefundStatus.PROCESSED
             )
+
+            if payment.monthly_arrangement_id is not None:
+                arrangement = await self.db.get(
+                    MonthlyTutoringArrangement, payment.monthly_arrangement_id
+                )
+                if arrangement is None:
+                    continue
+                base_share, remainder = divmod(
+                    payment.tutor_earning_minor, arrangement.duration_months
+                )
+                for offset in range(arrangement.duration_months):
+                    period_start, period_end = self._contract_month_window(arrangement, offset)
+                    if period_end > datetime.now(TUTOVA_TIMEZONE).date():
+                        continue
+                    month_start_dt = datetime.combine(period_start, datetime.min.time(), tzinfo=TUTOVA_TIMEZONE)
+                    month_end_dt = datetime.combine(period_end + timedelta(days=1), datetime.min.time(), tzinfo=TUTOVA_TIMEZONE)
+                    lessons = list((await self.db.scalars(
+                        select(LessonBooking).where(
+                            LessonBooking.monthly_arrangement_id == arrangement.id,
+                            LessonBooking.start_at >= month_start_dt,
+                            LessonBooking.start_at < month_end_dt,
+                            LessonBooking.status.notin_([BookingStatus.CANCELLED, BookingStatus.DECLINED]),
+                        )
+                    )).all())
+                    if not lessons or any(
+                        lesson.status != BookingStatus.COMPLETED
+                        or lesson.learner_acknowledged_at is None
+                        or lesson.disputed_at is not None
+                        or (lesson.admin_review_required_at is not None and lesson.admin_reviewed_at is None)
+                        for lesson in lessons
+                    ):
+                        continue
+                    existing = await self.db.scalar(
+                        select(TutorPayout.id).where(
+                            TutorPayout.payment_id == payment.id,
+                            TutorPayout.earning_period_start == period_start,
+                        )
+                    )
+                    if existing:
+                        continue
+                    month_offset = (period_start.year - arrangement.period_start.year) * 12 + (
+                        period_start.month - arrangement.period_start.month
+                    )
+                    installment = base_share + (remainder if month_offset == arrangement.duration_months - 1 else 0)
+                    refund_share = (
+                        refunded_tutor_share * installment // payment.tutor_earning_minor
+                        if payment.tutor_earning_minor > 0 else 0
+                    )
+                    available = installment - refund_share
+                    if available > 0:
+                        eligible.append({
+                            "payment_id": payment.id,
+                            "booking_id": payment.booking_id,
+                            "earning_period_start": period_start,
+                            "earning_period_end": period_end,
+                            "gross_amount_minor": payment.amount_minor,
+                            "available_amount_minor": available,
+                            "currency": payment.currency,
+                            "paid_at": payment.paid_at,
+                        })
+                continue
+
+            booking = await self.db.get(LessonBooking, payment.booking_id) if payment.booking_id else None
+            if (
+                booking is None
+                or booking.status != BookingStatus.COMPLETED
+                or booking.learner_acknowledged_at is None
+                or booking.disputed_at is not None
+                or booking.admin_review_required_at is not None
+            ):
+                continue
+            existing = await self.db.scalar(
+                select(TutorPayout.id).where(
+                    TutorPayout.payment_id == payment.id,
+                    TutorPayout.earning_period_start.is_(None),
+                )
+            )
+            if existing:
+                continue
             available = payment.tutor_earning_minor - refunded_tutor_share
             if available > 0:
-                eligible.append(
-                    {
-                        "payment_id": payment.id,
-                        "booking_id": payment.booking_id,
-                        "gross_amount_minor": payment.amount_minor,
-                        "available_amount_minor": available,
-                        "currency": payment.currency,
-                        "paid_at": payment.paid_at,
-                    }
-                )
+                eligible.append({
+                    "payment_id": payment.id,
+                    "booking_id": payment.booking_id,
+                    "earning_period_start": None,
+                    "earning_period_end": None,
+                    "gross_amount_minor": payment.amount_minor,
+                    "available_amount_minor": available,
+                    "currency": payment.currency,
+                    "paid_at": payment.paid_at,
+                })
         return eligible
+
+    async def get_earnings_summary(self, user: User) -> dict:
+        """Summarize paid contract earnings and the current month's accrued share."""
+        from app.domain.payments.models.payout import PayoutStatus, TutorPayout
+
+        tutor_id = await self.db.scalar(
+            select(TutorProfile.id).where(TutorProfile.user_id == user.id)
+        )
+        if tutor_id is None:
+            raise HTTPException(status_code=404, detail="Tutor profile not found.")
+
+        payments = list((await self.db.scalars(
+            select(Payment).where(
+                Payment.tutor_profile_id == tutor_id,
+                Payment.status.in_([PaymentStatus.PAID, PaymentStatus.PARTIALLY_REFUNDED]),
+            )
+        )).all())
+        payouts = list((await self.db.scalars(
+            select(TutorPayout).where(TutorPayout.tutor_profile_id == tutor_id)
+        )).all())
+
+        total_gross = sum(payment.amount_minor for payment in payments)
+        total_commission = sum(payment.platform_fee_minor for payment in payments)
+        total_tutor_earnings = sum(payment.tutor_earning_minor for payment in payments)
+        paid_out = sum(
+            payout.amount_minor for payout in payouts if payout.status == PayoutStatus.PAID
+        )
+        current_month = datetime.now(TUTOVA_TIMEZONE).date().replace(day=1)
+        current_month_earnings = 0
+        for payment in payments:
+            if payment.monthly_arrangement_id is None:
+                continue
+            arrangement = await self.db.get(
+                MonthlyTutoringArrangement, payment.monthly_arrangement_id
+            )
+            if arrangement is None:
+                continue
+            if not (arrangement.period_start <= datetime.now(TUTOVA_TIMEZONE).date() <= arrangement.period_end):
+                continue
+            months = arrangement.duration_months
+            base_share, remainder = divmod(payment.tutor_earning_minor, months)
+            month_offset = (current_month.year - arrangement.period_start.year) * 12 + (
+                current_month.month - arrangement.period_start.month
+            )
+            if 0 <= month_offset < months:
+                current_month_earnings += base_share + (remainder if month_offset == months - 1 else 0)
+
+        return {
+            "currency": "NGN",
+            "total_contract_amount_minor": total_gross,
+            "total_platform_commission_minor": total_commission,
+            "total_tutor_earnings_minor": total_tutor_earnings,
+            "current_month_earnings_minor": current_month_earnings,
+            "paid_out_minor": paid_out,
+            "held_tutor_earnings_minor": max(total_tutor_earnings - paid_out, 0),
+        }
 
     async def list_payouts_for_user(self, user: User):
         from app.domain.payments.models.payout import TutorPayout

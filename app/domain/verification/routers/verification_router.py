@@ -17,7 +17,12 @@ from app.domain.verification.schemas.verification import (
     VerificationReviewRequest,
     VerificationStatusResponse,
     VerificationSubmission,
+    TutorRefereeInviteRequest,
+    TutorRefereeResponse,
+    RefereeConsentPageResponse,
+    RefereeConsentSubmission,
 )
+from app.domain.verification.services.referee_service import RefereeService
 from app.domain.verification.services.identity_document_service import (
     IdentityDocumentService,
     settings,
@@ -30,6 +35,48 @@ router = APIRouter(
     prefix="/verification",
     tags=["Tutor Verification"],
 )
+
+
+@router.post(
+    "/tutor/referees",
+    response_model=list[TutorRefereeResponse],
+    status_code=status.HTTP_200_OK,
+)
+async def invite_tutor_referees(
+    payload: TutorRefereeInviteRequest,
+    current_user: RequireTutor,
+    db: DBSession,
+):
+    return await RefereeService(db).invite(current_user, payload)
+
+
+@router.get("/tutor/referees", response_model=list[TutorRefereeResponse])
+async def list_tutor_referees(current_user: RequireTutor, db: DBSession):
+    return await RefereeService(db).list_mine(current_user)
+
+
+@router.get(
+    "/admin/{verification_id}/referees",
+    response_model=list[TutorRefereeResponse],
+)
+async def list_verification_referees(
+    verification_id: uuid.UUID, current_user: RequireBookingAdmin, db: DBSession
+):
+    return await RefereeService(db).list_for_verification_admin(
+        current_user, verification_id
+    )
+
+
+@router.get("/referee/{token}", response_model=RefereeConsentPageResponse)
+async def get_referee_consent_form(token: str, db: DBSession):
+    return await RefereeService(db).get_consent_page(token)
+
+
+@router.post("/referee/{token}/consent", response_model=RefereeConsentPageResponse)
+async def submit_referee_consent(
+    token: str, payload: RefereeConsentSubmission, db: DBSession
+):
+    return await RefereeService(db).submit_consent(token, payload)
 
 
 @router.post(

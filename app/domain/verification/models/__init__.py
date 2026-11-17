@@ -4,3 +4,5 @@ from app.domain.verification.models.tutor_verification import (
 )
 
 __all__ = ["TutorVerification", "VerificationStatus"]
+
+from app.domain.verification.models.tutor_referee import TutorReferee, RefereeStatus

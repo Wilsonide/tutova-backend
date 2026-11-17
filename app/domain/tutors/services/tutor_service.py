@@ -77,7 +77,7 @@ class TutorService:
         # Explicit nulls are not accepted for required profile fields.
         for field in (
             "years_of_experience",
-            "hourly_rate",
+            "monthly_fee",
             "teaching_languages",
             "learner_age_groups",
             "tutoring_modes",

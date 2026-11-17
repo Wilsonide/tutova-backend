@@ -18,7 +18,7 @@ class AdminTutorProfileResponse(BaseModel):
     id: uuid.UUID
     user_id: uuid.UUID
     bio: str | None
-    hourly_rate: Decimal | None
+    monthly_fee: Decimal | None
     qualifications: str | None
     years_of_experience: int
     teaching_languages: list[str]

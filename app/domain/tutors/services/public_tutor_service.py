@@ -109,8 +109,8 @@ class PublicTutorService:
             bio=profile.bio,
             qualifications=profile.qualifications,
             years_of_experience=profile.years_of_experience,
-            hourly_rate=(
-                float(profile.hourly_rate) if profile.hourly_rate is not None else None
+            monthly_fee=(
+                float(profile.monthly_fee) if profile.monthly_fee is not None else None
             ),
             teaching_languages=profile.teaching_languages,
             learner_age_groups=profile.learner_age_groups,

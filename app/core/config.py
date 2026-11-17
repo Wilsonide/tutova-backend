@@ -38,6 +38,13 @@ class Settings(BaseSettings):
     CLOUDINARY_PROFILE_PICTURE_MAX_SIZE: int = 5 * 1024 * 1024
     CLOUDINARY_IDENTITY_DOCUMENT_MAX_SIZE: int = 10 * 1024 * 1024
     CLOUDINARY_IDENTITY_DOCUMENT_URL_TTL_SECONDS: int = 300
+    FRONTEND_BASE_URL: str = "http://localhost:3000"
+    SMTP_HOST: str = ""
+    SMTP_PORT: int = 587
+    SMTP_USERNAME: str = ""
+    SMTP_PASSWORD: str = ""
+    SMTP_FROM_EMAIL: str = ""
+    SMTP_USE_TLS: bool = True
 
     @field_validator("JWT_SECRET_KEY")
     @classmethod

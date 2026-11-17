@@ -92,8 +92,8 @@ class LessonBooking(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     )
 
     # Immutable pricing snapshot captured when the learner requests
-    # the booking, using the tutor's current hourly rate.
-    hourly_rate: Mapped[Decimal | None] = mapped_column(
+    # the booking, using the tutor.s current monthly fee.
+    monthly_fee: Mapped[Decimal | None] = mapped_column(
         Numeric(12, 2),
         nullable=True,
     )
@@ -182,6 +182,12 @@ class LessonBooking(Base, UUIDPrimaryKeyMixin, TimestampMixin):
         nullable=True,
         index=True,
     )
+    monthly_arrangement_id: Mapped[uuid.UUID | None] = mapped_column(
+    Uuid(as_uuid=True),
+    ForeignKey("monthly_tutoring_arrangements.id", ondelete="RESTRICT"),
+    nullable=True,
+    index=True,
+)
 
     admin_review_notification_sent_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True),
@@ -221,3 +227,7 @@ class LessonBooking(Base, UUIDPrimaryKeyMixin, TimestampMixin):
         foreign_keys=[requester_user_id],
     )
     location = relationship("Location")
+    monthly_arrangement = relationship(
+    "MonthlyTutoringArrangement",
+    back_populates="lessons",
+)

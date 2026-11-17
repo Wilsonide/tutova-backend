@@ -32,7 +32,7 @@ class PublicTutorResponse(BaseModel):
     qualifications: str | None
     years_of_experience: int
 
-    hourly_rate: float | None
+    monthly_fee: float | None
 
     teaching_languages: list[str]
     learner_age_groups: list[str]

@@ -905,7 +905,7 @@ class TutoringRequestService:
                     first_name=tutor_user.first_name,
                     last_name=tutor_user.last_name,
                     bio=tutor.bio,
-                    hourly_rate=tutor.hourly_rate,
+                    monthly_fee=tutor.monthly_fee,
                     qualifications=tutor.qualifications,
                     years_of_experience=tutor.years_of_experience,
                     teaching_languages=tutor.teaching_languages or [],

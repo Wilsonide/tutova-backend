@@ -1,6 +1,7 @@
 import uuid
+from datetime import date
 
-from fastapi import APIRouter, Header, HTTPException, Request, status
+from fastapi import APIRouter, Header, HTTPException, Query, Request, status
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 
@@ -25,6 +26,7 @@ from app.domain.payments.schemas.payment import (
     PayoutResponse,
     RefundCreate,
     RefundResponse,
+    TutorEarningsSummary,
 )
 from app.domain.payments.services.payment_service import PaymentService
 
@@ -125,14 +127,24 @@ async def get_payout_destination(current_user: RequireTutor, db: DBSession):
     status_code=status.HTTP_201_CREATED,
 )
 async def request_tutor_payout(
-    payment_id: uuid.UUID, current_user: RequireTutor, db: DBSession
+    payment_id: uuid.UUID,
+    current_user: RequireTutor,
+    db: DBSession,
+    earning_period_start: date | None = Query(default=None),
 ):
-    return await PaymentService(db).request_payout(current_user, payment_id)
+    return await PaymentService(db).request_payout(
+        current_user, payment_id, earning_period_start=earning_period_start
+    )
 
 
 @router.get("/payouts/eligible", response_model=list[PayoutEligibleResponse])
 async def list_eligible_payouts(current_user: RequireTutor, db: DBSession):
     return await PaymentService(db).list_eligible_payouts(current_user)
+
+
+@router.get("/earnings/summary", response_model=TutorEarningsSummary)
+async def get_tutor_earnings_summary(current_user: RequireTutor, db: DBSession):
+    return await PaymentService(db).get_earnings_summary(current_user)
 
 
 @router.get("/payouts/mine", response_model=list[PayoutResponse])

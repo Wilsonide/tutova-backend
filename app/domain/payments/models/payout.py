@@ -1,7 +1,7 @@
 import enum
 import uuid
-from datetime import datetime
-from sqlalchemy import DateTime, Enum, ForeignKey, Index, Integer, String, Uuid
+from datetime import date, datetime
+from sqlalchemy import Date, DateTime, Enum, ForeignKey, Index, Integer, String, Uuid, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.db.base import Base, TimestampMixin, UUIDPrimaryKeyMixin
 
@@ -38,10 +38,15 @@ class TutorPayout(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     __tablename__ = "tutor_payouts"
     __table_args__ = (
         Index("ix_tutor_payouts_tutor_created", "tutor_profile_id", "created_at"),
-        Index("ix_tutor_payouts_status", "status"),
+        UniqueConstraint(
+            "payment_id", "earning_period_start",
+            name="uq_tutor_payout_payment_earning_period",
+        ),
     )
     tutor_profile_id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), ForeignKey("tutor_profiles.id", ondelete="RESTRICT"), nullable=False)
-    payment_id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), ForeignKey("payments.id", ondelete="RESTRICT"), unique=True, nullable=False)
+    payment_id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), ForeignKey("payments.id", ondelete="RESTRICT"), nullable=False)
+    earning_period_start: Mapped[date | None] = mapped_column(Date, nullable=True)
+    earning_period_end: Mapped[date | None] = mapped_column(Date, nullable=True)
     recipient_id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), ForeignKey("payout_recipients.id", ondelete="RESTRICT"), nullable=False)
     provider: Mapped[str] = mapped_column(String(30), default="PAYSTACK", nullable=False)
     provider_reference: Mapped[str] = mapped_column(String(120), unique=True, nullable=False)

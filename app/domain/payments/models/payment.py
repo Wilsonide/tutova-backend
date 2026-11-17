@@ -26,8 +26,14 @@ class Payment(UUIDPrimaryKeyMixin, TimestampMixin, Base):
 
     booking_id: Mapped[uuid.UUID] = mapped_column(
         Uuid(as_uuid=True), ForeignKey("lesson_bookings.id", ondelete="RESTRICT"),
-        nullable=False, index=True,
+        nullable=True, index=True,
     )
+    monthly_arrangement_id: Mapped[uuid.UUID | None] = mapped_column(
+    Uuid(as_uuid=True),
+    ForeignKey("monthly_tutoring_arrangements.id", ondelete="RESTRICT"),
+    nullable=True,
+    unique=True,
+)
     requester_user_id: Mapped[uuid.UUID] = mapped_column(
         Uuid(as_uuid=True), ForeignKey("users.id", ondelete="RESTRICT"), nullable=False,
     )
@@ -43,7 +49,9 @@ class Payment(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     commission_bps: Mapped[int] = mapped_column(Integer, nullable=False)
     platform_fee_minor: Mapped[int] = mapped_column(Integer, nullable=False)
     tutor_earning_minor: Mapped[int] = mapped_column(Integer, nullable=False)
+    # Legacy historical snapshot retained for audit only; commission tiers no longer use hours.
     tutor_completed_hours_at_payment: Mapped[Decimal] = mapped_column(Numeric(8, 2), nullable=False)
+    tutor_completed_months_at_payment: Mapped[Decimal] = mapped_column(Numeric(8, 2), nullable=False, default=Decimal("0"))
     status: Mapped[PaymentStatus] = mapped_column(
         Enum(PaymentStatus, name="payment_status", values_callable=lambda e: [x.value for x in e]),
         default=PaymentStatus.PENDING, nullable=False, index=True,
@@ -54,3 +62,7 @@ class Payment(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     booking = relationship("LessonBooking")
     requester = relationship("User", foreign_keys=[requester_user_id])
     tutor_profile = relationship("TutorProfile")
+    monthly_arrangement = relationship(
+    "MonthlyTutoringArrangement",
+    back_populates="payment",
+)

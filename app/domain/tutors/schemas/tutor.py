@@ -10,7 +10,7 @@ TutoringMode = Literal["ONLINE", "IN_PERSON", "HYBRID"]
 
 class TutorProfileCreate(BaseModel):
     bio: str | None = Field(default=None, max_length=5000)
-    hourly_rate: float | None = Field(default=None, gt=0, le=10000000)
+    monthly_fee: float | None = Field(default=None, gt=0, le=10000000)
     qualifications: str | None = Field(default=None, max_length=5000)
 
     years_of_experience: int = Field(default=0, ge=0, le=80)
@@ -64,7 +64,7 @@ class TutorProfileCreate(BaseModel):
 
 class TutorProfileUpdate(BaseModel):
     bio: str | None = Field(default=None, max_length=5000)
-    hourly_rate: float | None = Field(default=None, gt=0, le=10000000)
+    monthly_fee: float | None = Field(default=None, gt=0, le=10000000)
     qualifications: str | None = Field(default=None, max_length=5000)
 
     years_of_experience: int | None = Field(
@@ -138,7 +138,7 @@ class TutorProfileResponse(BaseModel):
     id: uuid.UUID
     user_id: uuid.UUID
     bio: str | None
-    hourly_rate: float | None
+    monthly_fee: float | None
     qualifications: str | None
     years_of_experience: int
     teaching_languages: list[str]

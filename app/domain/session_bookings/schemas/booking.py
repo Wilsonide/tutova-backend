@@ -19,6 +19,8 @@ class BookingCreate(BaseModel):
 
     start_at: datetime
     duration_minutes: int = Field(ge=30, le=240)
+    contract_months: int = Field(default=1, ge=1, le=3)
+    monthly_arrangement_id: uuid.UUID | None = None
     meeting_link: str | None = Field(default=None, max_length=1000)
     lesson_notes: str | None = Field(default=None, max_length=3000)
 
@@ -54,8 +56,9 @@ class BookingResponse(BaseModel):
     end_at: datetime
     duration_minutes: int
 
-    hourly_rate: float | None = None
+    monthly_fee: float | None = None
     gross_amount_minor: int | None = None
+    monthly_arrangement_id: uuid.UUID | None = None
     currency: str = "NGN"
 
     status: BookingStatus

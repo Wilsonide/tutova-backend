@@ -13,6 +13,7 @@ from app.domain.payments.models.payout import (  # noqa: F401
 from app.domain.session_bookings.models.lesson_booking import (
     LessonBooking,
 )
+from app.domain.session_bookings.models.monthly_arrangement import MonthlyTutoringArrangement
 from app.domain.subjects.models.subject import Subject
 from app.domain.tutoring_requests.models.tutor_request_response import (
     TutorRequestResponse,
@@ -24,10 +25,12 @@ from app.domain.tutors.models.tutor_location import tutor_locations
 from app.domain.tutors.models.tutor_profile import TutorProfile
 from app.domain.tutors.models.tutor_subject import tutor_subjects
 from app.domain.verification.models.tutor_verification import TutorVerification
+from app.domain.verification.models.tutor_referee import TutorReferee
 
 __all__ = [
     "LearnerProfile",
     "LessonBooking",
+    "MonthlyTutoringArrangement",
     "Location",
     "Notification",
     "ParentProfile",
@@ -40,6 +43,7 @@ __all__ = [
     "TutorProfile",
     "TutorRequestResponse",
     "TutorVerification",
+    "TutorReferee",
     "TutoringRequest",
     "User",
     "tutor_locations",
