@@ -177,6 +177,7 @@ class TutorVideoUploadSignatureResponse(BaseModel):
     timestamp: int
     signature: str
     public_id: str
+    overwrite: bool
 
 
 class TutorVideoUploadCompleteRequest(BaseModel):

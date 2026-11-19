@@ -8,6 +8,8 @@ from sqlalchemy import (
     String,
     Text,
     Uuid,
+    Boolean,
+    JSON,
 )
 from sqlalchemy import (
     Enum as SAEnum,
@@ -97,3 +99,19 @@ class TutorVerification(Base, UUIDPrimaryKeyMixin, TimestampMixin):
         Text,
         nullable=True,
     )
+
+    # A safeguarding flag blocks approval until an administrator records
+    # an explicit safeguarding decision.
+    safeguarding_review_required: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="false", nullable=False
+    )
+    safeguarding_review_reasons: Mapped[list] = mapped_column(
+        JSON, default=list, nullable=False
+    )
+    safeguarding_reviewed_by: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    safeguarding_reviewed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    safeguarding_review_notes: Mapped[str | None] = mapped_column(Text, nullable=True)

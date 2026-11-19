@@ -39,12 +39,23 @@ ALLOWED_IDENTITY_DOCUMENT_TYPES = {
 }
 
 
+# ---------------------------------------------------------------------
+# Cloudinary configuration
+# ---------------------------------------------------------------------
+
+
 def configure_cloudinary() -> None:
-    cloud_name = settings.CLOUDINARY_CLOUD_NAME.strip()
-    api_key = settings.CLOUDINARY_API_KEY.strip()
-    api_secret = settings.CLOUDINARY_API_SECRET.strip()
+    cloud_name = str(settings.CLOUDINARY_CLOUD_NAME or "").strip()
+    api_key = str(settings.CLOUDINARY_API_KEY or "").strip()
+    api_secret = str(settings.CLOUDINARY_API_SECRET or "").strip()
 
     if not all((cloud_name, api_key, api_secret)):
+        logger.error(
+            "Cloudinary configuration is incomplete. "
+            "Check CLOUDINARY_CLOUD_NAME, CLOUDINARY_API_KEY, "
+            "and CLOUDINARY_API_SECRET."
+        )
+
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Cloudinary hosting is not configured.",
@@ -58,11 +69,16 @@ def configure_cloudinary() -> None:
     )
 
 
+# ---------------------------------------------------------------------
+# File signature validation
+# ---------------------------------------------------------------------
+
+
 def _validate_file_signature(
     content: bytes,
     content_type: str,
 ) -> bool:
-    """Check the file's actual signature rather than trusting its MIME type."""
+    """Check the actual file signature rather than trusting its MIME type."""
 
     if content_type == "application/pdf":
         return content.startswith(b"%PDF-")
@@ -95,7 +111,10 @@ def upload_tutor_profile_picture(
 
     allowed_extensions = ALLOWED_PROFILE_PICTURE_TYPES.get(content_type)
 
-    if not allowed_extensions or not _validate_file_signature(content, content_type):
+    if not allowed_extensions or not _validate_file_signature(
+        content,
+        content_type,
+    ):
         raise HTTPException(
             status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
             detail="Profile pictures must be valid JPEG, PNG, or WebP images.",
@@ -176,72 +195,119 @@ def tutor_video_public_id(tutor_user_id: str) -> str:
 
 def create_tutor_video_upload_signature(
     tutor_user_id: str,
-) -> dict[str, str | int]:
+) -> dict:
     """
-    Generate signed direct-upload authorization.
+    Generate a signed authorization payload for direct browser uploads.
 
-    The API secret remains on the backend.
+    The browser uploads the actual video directly to Cloudinary.
+    FastAPI generates the signature and verifies the uploaded asset.
     """
 
     configure_cloudinary()
 
-    cloud_config = cloudinary.config()
-
-    if (
-        not cloud_config.cloud_name
-        or not cloud_config.api_key
-        or not cloud_config.api_secret
-    ):
-        raise RuntimeError("Cloudinary is not properly configured.")
+    cloud_name = str(settings.CLOUDINARY_CLOUD_NAME).strip()
+    api_key = str(settings.CLOUDINARY_API_KEY).strip()
+    api_secret = str(settings.CLOUDINARY_API_SECRET).strip()
 
     timestamp = int(time.time())
 
-    public_id = f"tutova/tutor-introductions/{tutor_user_id}/pending-{uuid.uuid4().hex}"
+    public_id = (
+        f"tutova/tutor-introductions/{tutor_user_id}/introduction-{uuid.uuid4().hex}"
+    )
 
+    # This value must match the value sent by the frontend.
     params_to_sign = {
         "timestamp": timestamp,
         "public_id": public_id,
+        "overwrite": "false",
     }
 
     signature = api_sign_request(
         params_to_sign,
-        cloud_config.api_secret,
+        api_secret,
     )
 
     return {
-        "cloud_name": cloud_config.cloud_name,
-        "api_key": cloud_config.api_key,
+        "cloud_name": cloud_name,
+        "api_key": api_key,
         "timestamp": timestamp,
-        "signature": signature,
         "public_id": public_id,
+        "signature": signature,
+        "overwrite": False,
     }
 
 
 def get_tutor_video_resource(public_id: str) -> dict:
-    """Retrieve complete Cloudinary video resource metadata."""
+    """
+    Retrieve the uploaded Cloudinary video resource.
+
+    Request media metadata so Cloudinary can include available
+    media information in the resource response.
+    """
 
     configure_cloudinary()
 
-    asset = cloudinary.api.resource(
+    resource = cloudinary.api.resource(
         public_id,
         resource_type="video",
         type="upload",
         media_metadata=True,
     )
 
-    logger.info(
-        "Cloudinary video resource retrieved: "
-        "public_id=%s, keys=%s, duration=%s, "
-        "format=%s, bytes=%s, media_metadata=%s",
-        asset.get("public_id"),
-        list(asset.keys()),
-        asset.get("duration"),
-        asset.get("format"),
-        asset.get("bytes"),
-        asset.get("media_metadata"),
-    )
+    if not isinstance(resource, dict):
+        raise RuntimeError("Cloudinary returned an unexpected video resource response.")
 
-    return asset
+    return resource
+
+
+def _extract_video_duration(asset: dict) -> float | None:
+    """
+    Extract video duration from Cloudinary resource metadata.
+
+    Cloudinary normally exposes duration as a top-level field.
+    The additional checks accommodate metadata representations
+    returned by different API responses.
+    """
+
+    raw_duration = asset.get("duration")
+
+    if raw_duration is not None:
+        try:
+            return float(raw_duration)
+        except (TypeError, ValueError):
+            raise ValueError("Cloudinary returned an invalid video duration.")
+
+    media_metadata = asset.get("media_metadata")
+
+    if isinstance(media_metadata, dict):
+        raw_duration = media_metadata.get("duration")
+
+        if raw_duration is None:
+            video_metadata = media_metadata.get("video")
+
+            if isinstance(video_metadata, dict):
+                raw_duration = video_metadata.get("duration")
+
+        if raw_duration is not None:
+            try:
+                return float(raw_duration)
+            except (TypeError, ValueError):
+                raise ValueError("Cloudinary returned an invalid video duration.")
+
+    if isinstance(media_metadata, list):
+        for item in media_metadata:
+            if not isinstance(item, dict):
+                continue
+
+            raw_duration = item.get("duration")
+
+            if raw_duration is not None:
+                try:
+                    return float(raw_duration)
+                except (TypeError, ValueError):
+                    raise ValueError("Cloudinary returned an invalid video duration.")
+
+    return None
 
 
 def _validate_tutor_video_asset(
@@ -249,9 +315,9 @@ def _validate_tutor_video_asset(
     expected_public_id: str,
 ) -> None:
     """
-    Validate Cloudinary's actual asset metadata.
+    Validate Cloudinary's actual uploaded video metadata.
 
-    A missing duration is not treated as an overlength video.
+    Missing duration is not accepted as a valid video.
     """
 
     if asset.get("public_id") != expected_public_id:
@@ -269,6 +335,7 @@ def _validate_tutor_video_asset(
 
     try:
         file_size = int(asset.get("bytes") or 0)
+
     except (TypeError, ValueError) as exc:
         raise ValueError("Could not determine the uploaded video file size.") from exc
 
@@ -278,11 +345,11 @@ def _validate_tutor_video_asset(
     if file_size > MAX_INTRO_VIDEO_SIZE:
         raise ValueError("Introduction videos must not exceed 100 MB.")
 
-    raw_duration = asset.get("duration")
+    duration = _extract_video_duration(asset)
 
-    if raw_duration is None:
-        logger.error(
-            "Cloudinary video duration is missing. "
+    if duration is None:
+        logger.warning(
+            "Cloudinary has not returned video duration yet. "
             "public_id=%s, asset_keys=%s, media_metadata=%s",
             expected_public_id,
             list(asset.keys()),
@@ -290,14 +357,9 @@ def _validate_tutor_video_asset(
         )
 
         raise ValueError(
-            "Cloudinary could not determine the video duration. "
-            "Please try uploading again."
+            "Cloudinary is still processing your video. "
+            "Please wait a moment and try again."
         )
-
-    try:
-        duration = float(raw_duration)
-    except (TypeError, ValueError) as exc:
-        raise ValueError("Cloudinary returned an invalid video duration.") from exc
 
     if duration <= 0:
         raise ValueError("The uploaded video has an invalid duration.")
@@ -306,80 +368,55 @@ def _validate_tutor_video_asset(
         raise ValueError("Introduction videos must not exceed 120 seconds.")
 
     logger.info(
-        "Tutor introduction video duration validated: "
-        "public_id=%s, duration=%.2f seconds",
+        "Tutor introduction video validated: "
+        "public_id=%s, duration=%.2f seconds, size=%s bytes",
         expected_public_id,
         duration,
+        file_size,
     )
 
 
-def finalize_tutor_video_upload(
-    temporary_public_id: str,
+def verify_tutor_video_upload(
+    public_id: str,
     tutor_user_id: str,
 ) -> str:
     """
-    Validate a temporary Cloudinary video and rename it
-    to the tutor's permanent introduction-video public ID.
+    Verify a tutor's uploaded video without renaming the asset.
     """
 
     configure_cloudinary()
 
-    expected_prefix = f"tutova/tutor-introductions/{tutor_user_id}/pending-"
+    expected_prefix = f"tutova/tutor-introductions/{tutor_user_id}/introduction-"
 
-    if not temporary_public_id.startswith(expected_prefix):
+    if not public_id.startswith(expected_prefix):
         raise ValueError("Invalid introduction video public ID.")
 
-    temporary_suffix = temporary_public_id.removeprefix(expected_prefix)
+    suffix = public_id.removeprefix(expected_prefix)
 
-    if (
-        not temporary_suffix
-        or "/" in temporary_suffix
-        or len(temporary_suffix) != 32
-        or any(
-            character not in "0123456789abcdef"
-            for character in temporary_suffix.lower()
-        )
+    if len(suffix) != 32 or any(
+        character not in "0123456789abcdef" for character in suffix.lower()
     ):
-        raise ValueError("Invalid temporary introduction video ID.")
+        raise ValueError("Invalid introduction video ID.")
 
     try:
-        asset = get_tutor_video_resource(temporary_public_id)
+        asset = get_tutor_video_resource(public_id)
 
     except Exception as exc:
         logger.exception(
-            "Could not retrieve temporary tutor video from Cloudinary. public_id=%s",
-            temporary_public_id,
+            "Could not retrieve uploaded tutor video. public_id=%s",
+            public_id,
         )
 
         raise RuntimeError(
-            "Could not retrieve the uploaded video from Cloudinary. Please try again."
+            "Could not retrieve the uploaded video. Please try again."
         ) from exc
 
     _validate_tutor_video_asset(
         asset,
-        temporary_public_id,
+        public_id,
     )
 
-    permanent_public_id = tutor_video_public_id(tutor_user_id)
-
-    try:
-        cloudinary.uploader.rename(
-            temporary_public_id,
-            permanent_public_id,
-            resource_type="video",
-            overwrite=True,
-            invalidate=True,
-        )
-
-    except Exception as exc:
-        logger.exception(
-            "Could not finalize tutor introduction video. temporary_public_id=%s",
-            temporary_public_id,
-        )
-
-        raise RuntimeError("Could not finalize the introduction video.") from exc
-
-    return permanent_public_id
+    return public_id
 
 
 # ---------------------------------------------------------------------
@@ -480,6 +517,7 @@ def get_tutor_video_url(
 
     except Exception:
         logger.exception("Could not generate tutor introduction video URL.")
+
         return None
 
 
@@ -497,7 +535,10 @@ def upload_tutor_identity_document(
 
     allowed_extensions = ALLOWED_IDENTITY_DOCUMENT_TYPES.get(content_type)
 
-    if not allowed_extensions or not _validate_file_signature(content, content_type):
+    if not allowed_extensions or not _validate_file_signature(
+        content,
+        content_type,
+    ):
         raise HTTPException(
             status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
             detail=("Identity documents must be valid PDF, JPEG, or PNG files."),

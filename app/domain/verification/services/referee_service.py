@@ -7,14 +7,22 @@ from datetime import datetime, timedelta, timezone
 from email.message import EmailMessage
 
 from fastapi import HTTPException, status
-from sqlalchemy import delete, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.domain.authentication.models.user import User, UserRole
 from app.domain.verification.models.tutor_referee import RefereeStatus, TutorReferee
+from app.domain.verification.models.tutor_verification import (
+    TutorVerification,
+    VerificationStatus,
+)
 from app.domain.verification.repositories.referee_repository import RefereeRepository
-from app.domain.verification.schemas.verification import (
+from app.domain.verification.repositories.verification_repository import (
+    VerificationRepository,
+)
+from app.domain.verification.schemas.referee import (
+    AdminTutorRefereeResponse,
     RefereeConsentPageResponse,
     RefereeConsentSubmission,
     TutorRefereeInviteRequest,
@@ -32,36 +40,65 @@ class RefereeService:
     def __init__(self, db: AsyncSession):
         self.db = db
         self.repository = RefereeRepository(db)
+        self.verifications = VerificationRepository(db)
 
     @staticmethod
     def _require_tutor(user: User) -> None:
         if user.role != UserRole.TUTOR:
-            raise HTTPException(status_code=403, detail="Only tutors can manage referees.")
+            raise HTTPException(
+                status_code=403, detail="Only tutors can manage referees."
+            )
 
     @staticmethod
     def _token_hash(token: str) -> str:
         return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
     @staticmethod
-    def _send_email_sync(*, recipient: str, referee_name: str, referee_job_title: str, tutor_name: str, link: str) -> None:
+    def _send_email_sync(
+        *,
+        recipient: str,
+        referee_name: str,
+        referee_job_title: str,
+        tutor_name: str,
+        link: str,
+    ) -> None:
         message = EmailMessage()
-        message["Subject"] = "Tutova tutor reference and consent request"
+        message["Subject"] = f"Reference Request for {tutor_name} – Tutova"
         message["From"] = settings.SMTP_FROM_EMAIL
         message["To"] = recipient
+
         message.set_content(
             f"Hello {referee_name},\n\n"
-            f"{tutor_name} has listed you as one of their referees on Tutova. "
-            f"Your listed role/occupation is {referee_job_title}. "
-            "Please review the request and complete the response form using the secure link below.\n\n"
+            f"{tutor_name} has applied to become a tutor on Tutova "
+            "and listed you as one of their referees.\n\n"
+            "Because safety and trust are at the heart of our learning "
+            "community, we verify every tutor before they begin teaching. "
+            "We would appreciate a few minutes of your time to confirm your "
+            f"relationship with {tutor_name} and complete a brief reference check.\n\n"
+            "Please click the secure link below to review and submit your response:\n"
             f"{link}\n\n"
-            "The link is private and expires in 14 days. If you did not expect this message, "
-            "you can ignore it.\n\nTutova Safeguarding Team"
+            "For your security, this link is private and will expire in "
+            "7 days. If you were not expecting this request or do not know "
+            "the applicant, you may safely ignore this email.\n\n"
+            "Thank you for helping us keep learning safe for every child.\n\n"
+            "Warm regards,\n\n"
+            "The Tutova Safeguarding Team"
         )
-        with smtplib.SMTP(settings.SMTP_HOST, settings.SMTP_PORT, timeout=20) as smtp:
+
+        with smtplib.SMTP(
+            settings.SMTP_HOST,
+            settings.SMTP_PORT,
+            timeout=20,
+        ) as smtp:
             if settings.SMTP_USE_TLS:
                 smtp.starttls()
+
             if settings.SMTP_USERNAME:
-                smtp.login(settings.SMTP_USERNAME, settings.SMTP_PASSWORD)
+                smtp.login(
+                    settings.SMTP_USERNAME,
+                    settings.SMTP_PASSWORD,
+                )
+
             smtp.send_message(message)
 
     async def invite(
@@ -75,9 +112,12 @@ class RefereeService:
             )
 
         existing = await self.repository.list_for_tutor(tutor.id)
-        submitted_emails = {str(item.email).strip().lower() for item in payload.referees}
+        submitted_emails = {
+            str(item.email).strip().lower() for item in payload.referees
+        }
         if any(
-            referee.status == RefereeStatus.CONSENTED and referee.email not in submitted_emails
+            referee.status == RefereeStatus.CONSENTED
+            and referee.email not in submitted_emails
             for referee in existing
         ):
             raise HTTPException(
@@ -130,13 +170,16 @@ class RefereeService:
                 referee.job_title = item.job_title.strip()
                 referee.relationship_to_tutor = item.relationship_to_tutor.strip()
                 referee.consent_token_hash = self._token_hash(raw_token)
-                referee.token_expires_at = now + timedelta(days=14)
+                referee.token_expires_at = now + timedelta(days=7)
                 referee.invitation_sent_at = None
                 referee.status = RefereeStatus.PENDING
             tokens_to_send.append((referee, raw_token))
 
         for referee in existing:
-            if referee.email.lower() not in submitted_emails and referee.status != RefereeStatus.CONSENTED:
+            if (
+                referee.email.lower() not in submitted_emails
+                and referee.status != RefereeStatus.CONSENTED
+            ):
                 await self.db.delete(referee)
 
         await self.db.commit()
@@ -166,14 +209,21 @@ class RefereeService:
                 ),
             ) from exc
 
-        return [TutorRefereeResponse.model_validate(item) for item in await self.repository.list_for_tutor(tutor.id)]
+        return [
+            TutorRefereeResponse.model_validate(item)
+            for item in await self.repository.list_for_tutor(tutor.id)
+        ]
 
     async def _mark_expired(self, referees: list[TutorReferee]) -> None:
         now = datetime.now(timezone.utc)
         changed = False
         for referee in referees:
-            if referee.status == RefereeStatus.PENDING and referee.token_expires_at <= now:
+            if (
+                referee.status == RefereeStatus.PENDING
+                and referee.token_expires_at <= now
+            ):
                 referee.status = RefereeStatus.EXPIRED
+                referee.consent_token_hash = None
                 changed = True
         if changed:
             await self.db.commit()
@@ -182,38 +232,53 @@ class RefereeService:
         self._require_tutor(tutor)
         records = await self.repository.list_for_tutor(tutor.id)
         await self._mark_expired(records)
-        return [
-            TutorRefereeResponse.model_validate(item)
-            for item in records
-        ]
+        return [TutorRefereeResponse.model_validate(item) for item in records]
 
     async def list_for_verification_admin(
         self, admin: User, verification_id: uuid.UUID
-    ) -> list[TutorRefereeResponse]:
+    ) -> list[AdminTutorRefereeResponse]:
         if admin.role not in {UserRole.ADMIN, UserRole.SUPER_ADMIN}:
-            raise HTTPException(status_code=403, detail="Administrator access is required.")
-        from app.domain.verification.models.tutor_verification import TutorVerification
+            raise HTTPException(
+                status_code=403, detail="Administrator access is required."
+            )
+        from app.domain.verification.models.tutor_verification import (
+            TutorVerification,
+            VerificationStatus,
+        )
 
         verification = await self.db.get(TutorVerification, verification_id)
         if verification is None:
             raise HTTPException(status_code=404, detail="Tutor verification not found.")
         records = await self.repository.list_for_tutor(verification.tutor_user_id)
         await self._mark_expired(records)
-        return [
-            TutorRefereeResponse.model_validate(item)
-            for item in records
-        ]
+        return [AdminTutorRefereeResponse.model_validate(item) for item in records]
 
     async def get_consent_page(self, token: str) -> RefereeConsentPageResponse:
         referee = await self.repository.get_by_token_hash(self._token_hash(token))
         if referee is None:
-            raise HTTPException(status_code=404, detail="This referee invitation is invalid.")
-        if referee.token_expires_at <= datetime.now(timezone.utc) and referee.status == RefereeStatus.PENDING:
+            raise HTTPException(
+                status_code=404, detail="This referee invitation is invalid."
+            )
+        if (
+            referee.token_expires_at <= datetime.now(timezone.utc)
+            and referee.status == RefereeStatus.PENDING
+        ):
             referee.status = RefereeStatus.EXPIRED
+            referee.consent_token_hash = None
             await self.db.commit()
-            raise HTTPException(status_code=410, detail="This referee invitation has expired.")
+            raise HTTPException(
+                status_code=410, detail="This referee invitation has expired."
+            )
         tutor = await self.db.get(User, referee.tutor_user_id)
-        tutor_name = f"{tutor.first_name} {tutor.last_name}".strip() if tutor else "Tutova tutor"
+        tutor_name = (
+            f"{tutor.first_name} {tutor.last_name}".strip() if tutor else "Tutova tutor"
+        )
+        return self._consent_page_response(referee, tutor_name)
+
+    @staticmethod
+    def _consent_page_response(
+        referee: TutorReferee, tutor_name: str
+    ) -> RefereeConsentPageResponse:
         return RefereeConsentPageResponse(
             referee_name=referee.full_name,
             referee_email=referee.email,
@@ -223,27 +288,81 @@ class RefereeService:
         )
 
     async def submit_consent(
-        self, token: str, payload: RefereeConsentSubmission
+        self,
+        token: str,
+        payload: RefereeConsentSubmission,
+        *,
+        client_ip: str | None,
     ) -> RefereeConsentPageResponse:
+        # The repository locks the invitation row so two simultaneous requests
+        # cannot submit the same single-use link twice.
         referee = await self.repository.get_by_token_hash(self._token_hash(token))
         if referee is None:
-            raise HTTPException(status_code=404, detail="This referee invitation is invalid.")
+            raise HTTPException(
+                status_code=404,
+                detail="This referee invitation is invalid or has already been used.",
+            )
+
         now = datetime.now(timezone.utc)
         if referee.token_expires_at <= now:
             referee.status = RefereeStatus.EXPIRED
+            referee.consent_token_hash = None
             await self.db.commit()
-            raise HTTPException(status_code=410, detail="This referee invitation has expired.")
+            raise HTTPException(
+                status_code=410, detail="This referee invitation has expired."
+            )
+
         if referee.status != RefereeStatus.PENDING:
-            raise HTTPException(status_code=409, detail="This referee invitation has already been answered.")
-        referee.consented_name = payload.consented_name.strip()
+            raise HTTPException(
+                status_code=409,
+                detail="This referee invitation has already been answered.",
+            )
+
+        form = payload.reference_form
+        referee.consented_name = payload.consented_name
         referee.responded_at = now
-        if payload.consent:
-            referee.consent_statement = CONSENT_TEXT
-            referee.consented_at = now
-            referee.status = RefereeStatus.CONSENTED
-        else:
-            referee.consent_statement = None
-            referee.consented_at = None
-            referee.status = RefereeStatus.DECLINED
+        referee.reference_submitted_at = now
+        referee.reference_ip_address = client_ip[:45] if client_ip else None
+        referee.reference_response = form.model_dump(mode="json")
+        referee.consent_statement = CONSENT_TEXT
+        referee.consented_at = now
+        referee.status = RefereeStatus.CONSENTED
+        referee.safeguarding_review_required = form.requires_safeguarding_review
+        referee.safeguarding_review_reasons = form.safeguarding_review_reasons
+
+        if form.requires_safeguarding_review:
+            verification = await self.verifications.get_by_tutor_for_update(
+                referee.tutor_user_id
+            )
+            if verification is None:
+                verification = TutorVerification(tutor_user_id=referee.tutor_user_id)
+                self.db.add(verification)
+                await self.db.flush()
+
+            verification.safeguarding_review_required = True
+            if verification.status == VerificationStatus.APPROVED:
+                # A late adverse reference must suspend the previous approval
+                # until an administrator completes a fresh review.
+                verification.status = VerificationStatus.PENDING_REVIEW
+                verification.reviewed_by = None
+                verification.reviewed_at = None
+                verification.review_notes = None
+            existing_reasons = list(verification.safeguarding_review_reasons or [])
+            for reason in form.safeguarding_review_reasons:
+                if reason not in existing_reasons:
+                    existing_reasons.append(reason)
+            verification.safeguarding_review_reasons = existing_reasons
+            # A new safeguarding response requires a fresh human review.
+            verification.safeguarding_reviewed_by = None
+            verification.safeguarding_reviewed_at = None
+            verification.safeguarding_review_notes = None
+
+        # Invalidate the token in the same transaction as the response and audit data.
+        referee.consent_token_hash = None
         await self.db.commit()
-        return await self.get_consent_page(token)
+
+        tutor = await self.db.get(User, referee.tutor_user_id)
+        tutor_name = (
+            f"{tutor.first_name} {tutor.last_name}".strip() if tutor else "Tutova tutor"
+        )
+        return self._consent_page_response(referee, tutor_name)

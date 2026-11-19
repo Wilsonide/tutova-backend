@@ -20,6 +20,7 @@ from app.domain.verification.schemas.verification import (
     VerificationReviewRequest,
     VerificationSubmission,
 )
+from app.domain.verification.schemas.referee import SafeguardingReviewRequest
 
 
 class VerificationService:
@@ -277,6 +278,15 @@ class VerificationService:
             )
 
         if data.decision == "APPROVED":
+            if verification.safeguarding_review_required:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail=(
+                        "This tutor has an outstanding safeguarding review. "
+                        "Complete the safeguarding review before approving the application."
+                    ),
+                )
+
             referee_records = list((await self.db.scalars(
                 select(TutorReferee).where(
                     TutorReferee.tutor_user_id == verification.tutor_user_id
@@ -323,5 +333,34 @@ class VerificationService:
         verification.review_notes = (
             data.review_notes.strip() if data.review_notes else None
         )
+
+        return await self.verifications.save(verification)
+
+
+    async def review_safeguarding_flag(
+        self,
+        admin: User,
+        verification_id: uuid.UUID,
+        data: SafeguardingReviewRequest,
+    ) -> TutorVerification:
+        self._require_admin(admin)
+        verification = await self.verifications.get_by_id_for_update(verification_id)
+        if verification is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Verification submission not found.",
+            )
+        if not verification.safeguarding_review_required:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="This tutor has no outstanding safeguarding flag.",
+            )
+
+        verification.safeguarding_reviewed_by = admin.id
+        verification.safeguarding_reviewed_at = datetime.now(timezone.utc)
+        verification.safeguarding_review_notes = data.review_notes
+        if data.decision == "CLEAR":
+            verification.safeguarding_review_required = False
+            verification.safeguarding_review_reasons = []
 
         return await self.verifications.save(verification)

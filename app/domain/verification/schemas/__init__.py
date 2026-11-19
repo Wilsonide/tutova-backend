@@ -10,4 +10,21 @@ __all__ = [
     "VerificationReviewRequest",
     "VerificationStatusResponse",
     "VerificationSubmission",
+    "AdminTutorRefereeResponse",
+    "RefereeConsentPageResponse",
+    "RefereeConsentSubmission",
+    "RefereeReferenceForm",
+    "SafeguardingReviewRequest",
+    "TutorRefereeInviteRequest",
+    "TutorRefereeResponse",
 ]
+
+from app.domain.verification.schemas.referee import (
+    AdminTutorRefereeResponse,
+    RefereeConsentPageResponse,
+    RefereeConsentSubmission,
+    RefereeReferenceForm,
+    SafeguardingReviewRequest,
+    TutorRefereeInviteRequest,
+    TutorRefereeResponse,
+)

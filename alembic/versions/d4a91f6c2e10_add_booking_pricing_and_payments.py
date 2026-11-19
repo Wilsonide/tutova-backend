@@ -16,8 +16,8 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
-    op.add_column("tutor_profiles", sa.Column("hourly_rate", sa.Numeric(12, 2), nullable=True))
-    op.add_column("lesson_bookings", sa.Column("hourly_rate", sa.Numeric(12, 2), nullable=True))
+    op.add_column("tutor_profiles", sa.Column("monthly_fee", sa.Numeric(12, 2), nullable=True))
+    op.add_column("lesson_bookings", sa.Column("monthly_fee", sa.Numeric(12, 2), nullable=True))
     op.add_column("lesson_bookings", sa.Column("gross_amount_minor", sa.Integer(), nullable=True))
     op.add_column("lesson_bookings", sa.Column("currency", sa.String(length=3), server_default=sa.text("'NGN'"), nullable=False))
 
@@ -64,5 +64,5 @@ def downgrade() -> None:
     op.execute("DROP TYPE IF EXISTS payment_status")
     op.drop_column("lesson_bookings", "currency")
     op.drop_column("lesson_bookings", "gross_amount_minor")
-    op.drop_column("lesson_bookings", "hourly_rate")
-    op.drop_column("tutor_profiles", "hourly_rate")
+    op.drop_column("lesson_bookings", "monthly_fee")
+    op.drop_column("tutor_profiles", "monthly_fee")

@@ -1,7 +1,7 @@
 import uuid
 from typing import Annotated
 
-from fastapi import APIRouter, File, Query, UploadFile, status
+from fastapi import APIRouter, File, Query, Request, UploadFile, status
 
 from app.core.dependencies import (
     DBSession,
@@ -17,10 +17,14 @@ from app.domain.verification.schemas.verification import (
     VerificationReviewRequest,
     VerificationStatusResponse,
     VerificationSubmission,
-    TutorRefereeInviteRequest,
-    TutorRefereeResponse,
+)
+from app.domain.verification.schemas.referee import (
     RefereeConsentPageResponse,
     RefereeConsentSubmission,
+    AdminTutorRefereeResponse,
+    TutorRefereeInviteRequest,
+    TutorRefereeResponse,
+    SafeguardingReviewRequest,
 )
 from app.domain.verification.services.referee_service import RefereeService
 from app.domain.verification.services.identity_document_service import (
@@ -57,7 +61,7 @@ async def list_tutor_referees(current_user: RequireTutor, db: DBSession):
 
 @router.get(
     "/admin/{verification_id}/referees",
-    response_model=list[TutorRefereeResponse],
+    response_model=list[AdminTutorRefereeResponse],
 )
 async def list_verification_referees(
     verification_id: uuid.UUID, current_user: RequireBookingAdmin, db: DBSession
@@ -74,9 +78,32 @@ async def get_referee_consent_form(token: str, db: DBSession):
 
 @router.post("/referee/{token}/consent", response_model=RefereeConsentPageResponse)
 async def submit_referee_consent(
-    token: str, payload: RefereeConsentSubmission, db: DBSession
+    token: str,
+    payload: RefereeConsentSubmission,
+    request: Request,
+    db: DBSession,
 ):
-    return await RefereeService(db).submit_consent(token, payload)
+    client_ip = request.client.host if request.client else None
+    return await RefereeService(db).submit_consent(
+        token, payload, client_ip=client_ip
+    )
+
+
+@router.post(
+    "/admin/{verification_id}/safeguarding-review",
+    response_model=AdminVerificationResponse,
+)
+async def review_safeguarding_flag(
+    verification_id: uuid.UUID,
+    data: SafeguardingReviewRequest,
+    current_user: RequireBookingAdmin,
+    db: DBSession,
+):
+    result = await VerificationService(db).review_safeguarding_flag(
+        current_user, verification_id, data
+    )
+    await db.commit()
+    return result
 
 
 @router.post(

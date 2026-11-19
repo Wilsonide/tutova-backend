@@ -2,7 +2,17 @@ import enum
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, Enum, ForeignKey, Index, String, Text, UniqueConstraint, Uuid
+from sqlalchemy import (
+    JSON,
+    DateTime,
+    Enum,
+    ForeignKey,
+    Index,
+    String,
+    Text,
+    UniqueConstraint,
+    Uuid,
+)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base, TimestampMixin, UUIDPrimaryKeyMixin
@@ -29,16 +39,45 @@ class TutorReferee(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     email: Mapped[str] = mapped_column(String(320), nullable=False)
     job_title: Mapped[str] = mapped_column(String(160), nullable=False)
     relationship_to_tutor: Mapped[str] = mapped_column(String(100), nullable=False)
-    consent_token_hash: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
-    token_expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    invitation_sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    consent_token_hash: Mapped[str | None] = mapped_column(
+        String(64), unique=True, nullable=True
+    )
+    token_expires_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    invitation_sent_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     status: Mapped[RefereeStatus] = mapped_column(
-        Enum(RefereeStatus, name="tutor_referee_status", values_callable=lambda e: [x.value for x in e]),
-        default=RefereeStatus.PENDING, nullable=False, index=True,
+        Enum(
+            RefereeStatus,
+            name="tutor_referee_status",
+            values_callable=lambda e: [x.value for x in e],
+        ),
+        default=RefereeStatus.PENDING,
+        nullable=False,
+        index=True,
     )
     consented_name: Mapped[str | None] = mapped_column(String(160), nullable=True)
     consent_statement: Mapped[str | None] = mapped_column(Text, nullable=True)
-    consented_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    responded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    consented_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    responded_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+    # Full structured safeguarding reference response. Kept private from tutors.
+    reference_response: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    reference_submitted_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    reference_ip_address: Mapped[str | None] = mapped_column(String(45), nullable=True)
+    safeguarding_review_required: Mapped[bool] = mapped_column(
+        default=False, nullable=False
+    )
+    safeguarding_review_reasons: Mapped[list] = mapped_column(
+        JSON, default=list, nullable=False
+    )
 
     tutor = relationship("User", foreign_keys=[tutor_user_id])
