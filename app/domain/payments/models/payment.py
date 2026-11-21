@@ -24,15 +24,24 @@ class Payment(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         Index("ix_payments_tutor_created", "tutor_profile_id", "created_at"),
     )
 
-    booking_id: Mapped[uuid.UUID] = mapped_column(
+    booking_id: Mapped[uuid.UUID | None] = mapped_column(
         Uuid(as_uuid=True), ForeignKey("lesson_bookings.id", ondelete="RESTRICT"),
         nullable=True, index=True,
     )
+    # A booking is deliberately not created until this payment is verified.
+    tutoring_request_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(as_uuid=True), ForeignKey("tutoring_requests.id", ondelete="RESTRICT"),
+        nullable=True, index=True,
+    )
+    proposed_start_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    proposed_duration_minutes: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    proposed_lesson_notes: Mapped[str | None] = mapped_column(String(3000), nullable=True)
+    proposed_contract_months: Mapped[int | None] = mapped_column(Integer, nullable=True)
     monthly_arrangement_id: Mapped[uuid.UUID | None] = mapped_column(
     Uuid(as_uuid=True),
     ForeignKey("monthly_tutoring_arrangements.id", ondelete="RESTRICT"),
     nullable=True,
-    unique=True,
+    index=True,
 )
     requester_user_id: Mapped[uuid.UUID] = mapped_column(
         Uuid(as_uuid=True), ForeignKey("users.id", ondelete="RESTRICT"), nullable=False,
@@ -44,7 +53,18 @@ class Payment(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     provider_reference: Mapped[str] = mapped_column(String(120), unique=True, nullable=False)
     idempotency_key: Mapped[str] = mapped_column(String(120), unique=True, nullable=False)
     checkout_url: Mapped[str | None] = mapped_column(String(1000), nullable=True)
+    # amount_minor is the total amount charged to the learner.
     amount_minor: Mapped[int] = mapped_column(Integer, nullable=False)
+    # Immutable breakdown: tutoring fee + learner-side platform contribution.
+    tutoring_amount_minor: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
+    tutor_commission_minor: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
+    learner_fee_minor: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
     currency: Mapped[str] = mapped_column(String(3), default="NGN", nullable=False)
     commission_bps: Mapped[int] = mapped_column(Integer, nullable=False)
     platform_fee_minor: Mapped[int] = mapped_column(Integer, nullable=False)
@@ -63,6 +83,6 @@ class Payment(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     requester = relationship("User", foreign_keys=[requester_user_id])
     tutor_profile = relationship("TutorProfile")
     monthly_arrangement = relationship(
-    "MonthlyTutoringArrangement",
-    back_populates="payment",
-)
+        "MonthlyTutoringArrangement",
+        back_populates="payments",
+    )

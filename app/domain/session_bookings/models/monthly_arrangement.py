@@ -8,6 +8,7 @@ from sqlalchemy import (
     Date,
     DateTime,
     Enum,
+    JSON,
     ForeignKey,
     Index,
     Integer,
@@ -109,8 +110,19 @@ class MonthlyTutoringArrangement(
     # Immutable commission and tutor earnings snapshots captured when the
     # tutoring arrangement is created.
     commission_bps: Mapped[int] = mapped_column(Integer, nullable=False)
+    # Aggregate immutable snapshots across all contract months.
     platform_fee_minor: Mapped[int] = mapped_column(Integer, nullable=False)
+    tutor_commission_minor: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
+    learner_fee_minor: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
     tutor_earning_minor: Mapped[int] = mapped_column(Integer, nullable=False)
+    # Per-month snapshots allow the commission tier to change during a contract.
+    commission_schedule: Mapped[list[dict]] = mapped_column(
+        JSON, nullable=False, default=list, server_default="[]"
+    )
     completed_months_at_creation: Mapped[Decimal] = mapped_column(
         Numeric(8, 2), nullable=False
     )
@@ -168,8 +180,7 @@ class MonthlyTutoringArrangement(
         back_populates="monthly_arrangement",
     )
 
-    payment = relationship(
+    payments = relationship(
         "Payment",
         back_populates="monthly_arrangement",
-        uselist=False,
     )

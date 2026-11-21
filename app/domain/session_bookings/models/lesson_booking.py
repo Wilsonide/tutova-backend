@@ -136,6 +136,12 @@ class LessonBooking(Base, UUIDPrimaryKeyMixin, TimestampMixin):
         nullable=True,
     )
 
+    # New bookings require both tutor and learner progress reports before
+    # the learner can acknowledge completion. Existing rows are backfilled false.
+    progress_reports_required: Mapped[bool] = mapped_column(
+        default=True, server_default="true", nullable=False
+    )
+
     cancellation_reason: Mapped[str | None] = mapped_column(
         Text,
         nullable=True,

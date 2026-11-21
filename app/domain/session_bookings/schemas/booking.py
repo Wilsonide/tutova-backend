@@ -46,6 +46,7 @@ class BookingCancel(BaseModel):
 
 class BookingResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
+    payment_required: bool = True
 
     id: uuid.UUID
     tutoring_request_id: uuid.UUID
@@ -99,3 +100,8 @@ class BookingAccept(BaseModel):
     """Optional meeting link supplied by the tutor when accepting."""
 
     meeting_link: str | None = Field(default=None, max_length=1000)
+
+
+class AdminBookingReview(BaseModel):
+    resolution: str = Field(pattern=r"^(RETURN_TO_LEARNER_ACKNOWLEDGEMENT|CANCEL_BOOKING)$")
+    notes: str = Field(min_length=5, max_length=3000)

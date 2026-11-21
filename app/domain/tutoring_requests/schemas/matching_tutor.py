@@ -9,6 +9,8 @@ class MatchingTutorResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     tutor_user_id: uuid.UUID
+    tutor_profile_id: uuid.UUID | None = None
+    response_decision: str | None = None
 
     first_name: str
     last_name: str

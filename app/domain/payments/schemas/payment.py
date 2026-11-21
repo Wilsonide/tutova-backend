@@ -9,10 +9,14 @@ from app.domain.payments.models.payment import PaymentStatus
 
 class PaymentCheckoutResponse(BaseModel):
     payment_id: uuid.UUID
-    booking_id: uuid.UUID
+    booking_id: uuid.UUID | None = None
+    tutoring_request_id: uuid.UUID | None = None
     checkout_url: str
     provider_reference: str
     amount_minor: int
+    tutoring_amount_minor: int
+    tutor_commission_minor: int
+    learner_fee_minor: int
     currency: str
     commission_bps: int
     platform_fee_minor: int
@@ -25,6 +29,7 @@ class PaymentResponse(BaseModel):
 
     id: uuid.UUID
     booking_id: uuid.UUID | None
+    tutoring_request_id: uuid.UUID | None = None
     monthly_arrangement_id: uuid.UUID | None = None
     requester_user_id: uuid.UUID
     tutor_profile_id: uuid.UUID
@@ -32,6 +37,9 @@ class PaymentResponse(BaseModel):
     provider_reference: str
     checkout_url: str | None = None
     amount_minor: int
+    tutoring_amount_minor: int
+    tutor_commission_minor: int
+    learner_fee_minor: int
     currency: str
     commission_bps: int
     platform_fee_minor: int
@@ -113,6 +121,8 @@ class TutorEarningsSummary(BaseModel):
     currency: str
     total_contract_amount_minor: int
     total_platform_commission_minor: int
+    total_tutor_commission_minor: int
+    total_learner_fee_minor: int
     total_tutor_earnings_minor: int
     current_month_earnings_minor: int
     paid_out_minor: int

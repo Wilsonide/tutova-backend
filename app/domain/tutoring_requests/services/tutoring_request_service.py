@@ -34,6 +34,7 @@ from app.domain.tutoring_requests.schemas.matching_tutor import (
 )
 from app.domain.tutoring_requests.schemas.tutoring_request import (
     TutoringRequestCreate,
+    TutoringRequestResponse,
     TutorMatchingRequestResponse,
     TutorRequestDecisionResult,
 )
@@ -243,7 +244,7 @@ class TutoringRequestService:
                 detail="The selected tutor does not support this tutoring mode.",
             )
 
-        if tutoring_mode == TutoringMode.IN_PERSON:
+        if tutoring_mode in {TutoringMode.IN_PERSON, TutoringMode.HYBRID}:
             if not await self._tutor_serves_location(tutor, location_id):
                 raise HTTPException(
                     status_code=422,
@@ -336,7 +337,7 @@ class TutoringRequestService:
                 detail="The selected subject is unavailable.",
             )
 
-        if data.tutoring_mode == TutoringMode.IN_PERSON:
+        if data.tutoring_mode in {TutoringMode.IN_PERSON, TutoringMode.HYBRID}:
             location_result = await self.db.execute(
                 select(Location).where(
                     Location.id == data.location_id,
@@ -382,6 +383,22 @@ class TutoringRequestService:
                 ),
             )
 
+            admin_users = list((await self.db.scalars(
+                select(User).where(
+                    User.role.in_([UserRole.ADMIN, UserRole.SUPER_ADMIN]),
+                    User.status == UserStatus.ACTIVE,
+                )
+            )).all())
+            notifications = NotificationService(self.db)
+            for admin_user in admin_users:
+                await notifications.create(
+                    user_id=admin_user.id,
+                    notification_type=NotificationType.ADMIN_NEW_TUTORING_REQUEST,
+                    title="New tutoring request submitted",
+                    message="A learner has submitted a tutoring request. Review its payment and assignment progress.",
+                    data={"tutoring_request_id": str(request.id)},
+                )
+
             await self.requests.commit()
             await self.db.refresh(request)
 
@@ -391,10 +408,17 @@ class TutoringRequestService:
             await self.requests.rollback()
             raise
 
+    async def list_admin_requests(self) -> list[TutoringRequest]:
+        return list((await self.db.scalars(
+            select(TutoringRequest)
+            .options(selectinload(TutoringRequest.requester), selectinload(TutoringRequest.subject), selectinload(TutoringRequest.location))
+            .order_by(TutoringRequest.created_at.desc())
+        )).all())
+
     async def list_my_requests(
         self,
         user: User,
-    ) -> list[TutoringRequest]:
+    ) -> list[TutoringRequestResponse]:
         self._ensure_active_account(user)
 
         if role_value(user) not in {"PARENT", "ADULT_LEARNER"}:
@@ -403,7 +427,22 @@ class TutoringRequestService:
                 detail=("Only parents and adult learners can view their requests."),
             )
 
-        return await self.requests.list_for_requester(user.id)
+        requests = await self.requests.list_for_requester(user.id)
+        response_rows: list[TutoringRequestResponse] = []
+
+        for request in requests:
+            response = TutoringRequestResponse.model_validate(request)
+            if request.selected_tutor_id is not None:
+                tutor_response = await self.requests.get_tutor_response(
+                    request_id=request.id,
+                    tutor_profile_id=request.selected_tutor_id,
+                )
+                response.selected_tutor_response = (
+                    tutor_response.decision.value if tutor_response else None
+                )
+            response_rows.append(response)
+
+        return response_rows
 
     async def get_my_request(
         self,
@@ -495,9 +534,14 @@ class TutoringRequestService:
             is_accepted_assignment = (
                 request_status == "ACCEPTED" and request.assigned_tutor_id == tutor.id
             )
+            is_direct_request = (
+                request_status == "OPEN" and request.selected_tutor_id == tutor.id
+            )
 
-            # Apply matching rules only to requests that are still open.
-            if not is_accepted_assignment:
+            # Generic open requests must continue to match the tutor's profile.
+            # A direct request is already addressed to this tutor, so it remains
+            # visible even if the tutor later edits their profile.
+            if not is_accepted_assignment and not is_direct_request:
                 if request.subject_id not in subject_ids:
                     continue
 
@@ -508,7 +552,7 @@ class TutoringRequestService:
                 if mode not in supported_modes:
                     continue
 
-                if mode == TutoringMode.IN_PERSON.value:
+                if mode in {TutoringMode.IN_PERSON.value, TutoringMode.HYBRID.value}:
                     if not await self._tutor_serves_location(
                         tutor,
                         request.location_id,
@@ -531,6 +575,10 @@ class TutoringRequestService:
                 else None
             )
 
+            my_response = await self.requests.get_tutor_response(
+                request_id=request.id,
+                tutor_profile_id=tutor.id,
+            )
             matched.append(
                 TutorMatchingRequestResponse(
                     id=request.id,
@@ -554,6 +602,7 @@ class TutoringRequestService:
                     description=request.description,
                     preferred_schedule=request.preferred_schedule,
                     created_at=request.created_at,
+                    my_response=(my_response.decision.value if my_response else None),
                 )
             )
 
@@ -596,36 +645,43 @@ class TutoringRequestService:
                 detail="This tutoring request was directed to another tutor.",
             )
 
-        if request.subject_id not in {subject.id for subject in tutor.subjects}:
+        if decision not in {"ACCEPT", "DECLINE"}:
             raise HTTPException(
-                status_code=403,
-                detail="You are not registered to teach this subject.",
+                status_code=422,
+                detail="Invalid decision. Choose ACCEPT or DECLINE.",
             )
 
-        mode = request.tutoring_mode.value
-
-        supported_modes = {
-            str(getattr(value, "value", value)).upper()
-            for value in (tutor.tutoring_modes or [])
-        }
-
-        if mode not in supported_modes:
-            raise HTTPException(
-                status_code=403,
-                detail="Your profile does not support this tutoring mode.",
-            )
-
-        if mode == TutoringMode.IN_PERSON.value:
-            if not await self._tutor_serves_location(
-                tutor,
-                request.location_id,
-            ):
+        is_direct_request_for_tutor = request.selected_tutor_id == tutor.id
+        if not is_direct_request_for_tutor or decision == "ACCEPT":
+            if request.subject_id not in {subject.id for subject in tutor.subjects}:
                 raise HTTPException(
                     status_code=403,
-                    detail=(
-                        "This request is outside your registered service locations."
-                    ),
+                    detail="You are not registered to teach this subject.",
                 )
+
+            mode = request.tutoring_mode.value
+            supported_modes = {
+                str(getattr(value, "value", value)).upper()
+                for value in (tutor.tutoring_modes or [])
+            }
+
+            if mode not in supported_modes:
+                raise HTTPException(
+                    status_code=403,
+                    detail="Your profile does not support this tutoring mode.",
+                )
+
+            if mode in {TutoringMode.IN_PERSON.value, TutoringMode.HYBRID.value}:
+                if not await self._tutor_serves_location(
+                    tutor,
+                    request.location_id,
+                ):
+                    raise HTTPException(
+                        status_code=403,
+                        detail=(
+                            "This request is outside your registered service locations."
+                        ),
+                    )
 
         existing_response = await self.requests.get_tutor_response(
             request_id=request.id,
@@ -636,12 +692,6 @@ class TutoringRequestService:
             raise HTTPException(
                 status_code=409,
                 detail="You have already responded to this request.",
-            )
-
-        if decision not in {"ACCEPT", "DECLINE"}:
-            raise HTTPException(
-                status_code=422,
-                detail="Invalid decision. Choose ACCEPT or DECLINE.",
             )
 
         response_decision = (
@@ -660,20 +710,37 @@ class TutoringRequestService:
             await self.requests.create_tutor_response(response)
 
             if response_decision == TutorResponseDecision.ACCEPTED:
-                request.status = TutoringRequestStatus.ACCEPTED
-                request.assigned_tutor_id = tutor.id
-                request.accepted_at = datetime.now(timezone.utc)
-
                 notifications = NotificationService(self.db)
+                if request.selected_tutor_id is not None:
+                    # Direct tutor requests have one intended tutor; their acceptance
+                    # moves the request to the booking stage.
+                    request.status = TutoringRequestStatus.ACCEPTED
+                    request.assigned_tutor_id = tutor.id
+                    request.accepted_at = datetime.now(timezone.utc)
+                    message = "Your selected tutor accepted the request. You can now arrange the lesson."
+                else:
+                    # Generic requests collect tutor interest first. The learner
+                    # explicitly chooses one responder before a booking is enabled.
+                    message = "A tutor is interested in your request. Review the interested tutors and choose one to continue."
 
                 await notifications.create(
                     user_id=request.requester_user_id,
                     notification_type=NotificationType.TUTOR_ACCEPTED_REQUEST,
-                    title="A tutor accepted your request",
+                    title="A tutor responded to your request",
+                    message=message,
+                    data={
+                        "tutoring_request_id": str(request.id),
+                        "tutor_profile_id": str(tutor.id),
+                    },
+                )
+            elif request.selected_tutor_id is not None:
+                await NotificationService(self.db).create(
+                    user_id=request.requester_user_id,
+                    notification_type=NotificationType.TUTOR_DECLINED_REQUEST,
+                    title="Your selected tutor declined the request",
                     message=(
-                        "A verified tutor has accepted your tutoring "
-                        "request. You can now review the request and "
-                        "proceed to arrange the lesson."
+                        "Your selected tutor is unavailable for this request. "
+                        "Cancel it and submit a new request to choose another tutor."
                     ),
                     data={
                         "tutoring_request_id": str(request.id),
@@ -684,7 +751,7 @@ class TutoringRequestService:
             await self.requests.commit()
 
             if decision == "ACCEPT":
-                message = "You have accepted this tutoring request."
+                message = ("You have accepted this direct tutoring request." if request.selected_tutor_id is not None else "You have expressed interest. The learner will review your response.")
             elif request.selected_tutor_id is not None:
                 message = (
                     "You have declined this request. It remains directed "
@@ -706,6 +773,61 @@ class TutoringRequestService:
         except Exception:
             await self.requests.rollback()
             raise
+
+    async def select_tutor(
+        self,
+        user: User,
+        request_id: uuid.UUID,
+        tutor_profile_id: uuid.UUID,
+    ) -> TutoringRequest:
+        self._ensure_active_account(user)
+        request = await self.requests.get_by_id_for_update(request_id)
+        if request is None:
+            raise HTTPException(status_code=404, detail="Tutoring request not found.")
+        if request.requester_user_id != user.id:
+            raise HTTPException(status_code=403, detail="You cannot select a tutor for this request.")
+        if request.status != TutoringRequestStatus.OPEN or request.selected_tutor_id is not None:
+            raise HTTPException(status_code=409, detail="This request is no longer accepting tutor selections.")
+        response = await self.db.scalar(select(TutorRequestResponseModel).where(
+            TutorRequestResponseModel.tutoring_request_id == request.id,
+            TutorRequestResponseModel.tutor_profile_id == tutor_profile_id,
+            TutorRequestResponseModel.decision == TutorResponseDecision.ACCEPTED,
+        ))
+        if response is None:
+            raise HTTPException(status_code=422, detail="The selected tutor has not accepted this request.")
+        tutor = await self.db.get(TutorProfile, tutor_profile_id)
+        if tutor is None:
+            raise HTTPException(status_code=404, detail="Selected tutor profile not found.")
+        request.selected_tutor_id = tutor.id
+        request.assigned_tutor_id = tutor.id
+        request.status = TutoringRequestStatus.ACCEPTED
+        request.accepted_at = datetime.now(timezone.utc)
+        notifications = NotificationService(self.db)
+        await notifications.create(
+            user_id=tutor.user_id,
+            notification_type=NotificationType.TUTOR_ACCEPTED_REQUEST,
+            title="You have been selected for the tutoring request",
+            message="The learner selected you. You can now proceed with the booking arrangement.",
+            data={"tutoring_request_id": str(request.id), "tutor_profile_id": str(tutor.id)},
+        )
+        other_responses = list((await self.db.scalars(select(TutorRequestResponseModel).where(
+            TutorRequestResponseModel.tutoring_request_id == request.id,
+            TutorRequestResponseModel.decision == TutorResponseDecision.ACCEPTED,
+            TutorRequestResponseModel.tutor_profile_id != tutor.id,
+        ))).all())
+        for other in other_responses:
+            other_tutor = await self.db.get(TutorProfile, other.tutor_profile_id)
+            if other_tutor:
+                await notifications.create(
+                    user_id=other_tutor.user_id,
+                    notification_type=NotificationType.NEW_MATCHING_REQUEST,
+                    title="Tutoring opportunity has been taken",
+                    message="The learner selected another tutor for this request. Thank you for your interest.",
+                    data={"tutoring_request_id": str(request.id), "selected_tutor_profile_id": str(tutor.id)},
+                )
+        await self.requests.commit()
+        await self.db.refresh(request)
+        return request
 
     async def _notify_matching_tutors(
         self,
@@ -757,7 +879,7 @@ class TutoringRequestService:
             if mode not in supported_modes:
                 continue
 
-            if mode == TutoringMode.IN_PERSON.value:
+            if mode in {TutoringMode.IN_PERSON.value, TutoringMode.HYBRID.value}:
                 if not await self._tutor_serves_location(
                     tutor,
                     request.location_id,
@@ -826,7 +948,7 @@ class TutoringRequestService:
         requested_location = None
 
         if (
-            request.tutoring_mode == TutoringMode.IN_PERSON
+            request.tutoring_mode in {TutoringMode.IN_PERSON, TutoringMode.HYBRID}
             and request.location_id is not None
         ):
             location_result = await self.db.execute(
@@ -865,7 +987,7 @@ class TutoringRequestService:
 
             location_matches = True
 
-            if requested_mode == TutoringMode.IN_PERSON.value:
+            if requested_mode in {TutoringMode.IN_PERSON.value, TutoringMode.HYBRID.value}:
                 location_matches = await self._tutor_serves_location(
                     tutor,
                     request.location_id,
@@ -878,13 +1000,17 @@ class TutoringRequestService:
                 (
                     "Supports online tutoring."
                     if requested_mode == TutoringMode.ONLINE.value
-                    else "Supports in-person tutoring."
+                    else (
+                        "Supports hybrid tutoring."
+                        if requested_mode == TutoringMode.HYBRID.value
+                        else "Supports in-person tutoring."
+                    )
                 ),
             ]
 
             unmatched_criteria = []
 
-            if requested_mode == TutoringMode.IN_PERSON.value:
+            if requested_mode in {TutoringMode.IN_PERSON.value, TutoringMode.HYBRID.value}:
                 if location_matches:
                     match_reasons.append(
                         "Serves the requested location or a broader area containing it."
@@ -919,6 +1045,17 @@ class TutoringRequestService:
                     unmatched_criteria=unmatched_criteria,
                 )
             )
+
+        response_rows = list((await self.db.scalars(
+            select(TutorRequestResponseModel).where(
+                TutorRequestResponseModel.tutoring_request_id == request.id
+            )
+        )).all())
+        response_by_tutor = {row.tutor_profile_id: row.decision.value for row in response_rows}
+        profile_ids_by_user = {tutor.user_id: tutor.id for tutor, _ in candidates}
+        for item in matches:
+            item.tutor_profile_id = profile_ids_by_user.get(item.tutor_user_id)
+            item.response_decision = response_by_tutor.get(item.tutor_profile_id)
 
         matches.sort(
             key=lambda item: (

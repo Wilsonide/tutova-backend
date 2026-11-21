@@ -229,6 +229,7 @@ class VerificationService:
         verification.status = VerificationStatus.PENDING_REVIEW
         verification.reviewed_by = None
         verification.reviewed_at = None
+        verification.approved_at = None
         verification.review_notes = None
 
         return await self.verifications.save(verification)
@@ -327,9 +328,14 @@ class VerificationService:
                     detail="Review notes are required for this decision.",
                 )
 
-        verification.status = VerificationStatus(data.decision)
+        decision = VerificationStatus(data.decision)
+        now = datetime.now(timezone.utc)
+        verification.status = decision
         verification.reviewed_by = admin.id
-        verification.reviewed_at = datetime.now(timezone.utc)
+        verification.reviewed_at = now
+        # Tenure starts on the actual approval decision, not registration or
+        # an earlier rejected/changes-requested review.
+        verification.approved_at = now if decision == VerificationStatus.APPROVED else None
         verification.review_notes = (
             data.review_notes.strip() if data.review_notes else None
         )

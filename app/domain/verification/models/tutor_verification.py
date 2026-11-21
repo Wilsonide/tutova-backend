@@ -95,6 +95,13 @@ class TutorVerification(Base, UUIDPrimaryKeyMixin, TimestampMixin):
         nullable=True,
     )
 
+    # Timestamp of the current approval decision. This is the start of the
+    # tutor commission-tenure clock and is separate from the last review time.
+    approved_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
     review_notes: Mapped[str | None] = mapped_column(
         Text,
         nullable=True,

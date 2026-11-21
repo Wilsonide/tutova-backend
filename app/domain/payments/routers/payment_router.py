@@ -29,6 +29,7 @@ from app.domain.payments.schemas.payment import (
     TutorEarningsSummary,
 )
 from app.domain.payments.services.payment_service import PaymentService
+from app.domain.session_bookings.schemas.booking import BookingCreate
 
 router = APIRouter(prefix="/payments", tags=["Payments"])
 
@@ -53,6 +54,42 @@ async def initialize_booking_payment(
         checkout_url=payment.checkout_url,
         provider_reference=payment.provider_reference,
         amount_minor=payment.amount_minor,
+        tutoring_amount_minor=payment.tutoring_amount_minor,
+        tutor_commission_minor=payment.tutor_commission_minor,
+        learner_fee_minor=payment.learner_fee_minor,
+        currency=payment.currency,
+        commission_bps=payment.commission_bps,
+        platform_fee_minor=payment.platform_fee_minor,
+        tutor_earning_minor=payment.tutor_earning_minor,
+        status=payment.status,
+    )
+
+
+@router.post(
+    "/requests/{request_id}/initialize",
+    response_model=PaymentCheckoutResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def initialize_request_payment(
+    request_id: uuid.UUID,
+    payload: BookingCreate,
+    current_user: CurrentUser,
+    db: DBSession,
+    idempotency_key: str = Header(alias="Idempotency-Key"),
+):
+    payment = await PaymentService(db).initialize_request_payment(
+        current_user, request_id, payload, idempotency_key
+    )
+    return PaymentCheckoutResponse(
+        payment_id=payment.id,
+        booking_id=payment.booking_id,
+        tutoring_request_id=payment.tutoring_request_id,
+        checkout_url=payment.checkout_url,
+        provider_reference=payment.provider_reference,
+        amount_minor=payment.amount_minor,
+        tutoring_amount_minor=payment.tutoring_amount_minor,
+        tutor_commission_minor=payment.tutor_commission_minor,
+        learner_fee_minor=payment.learner_fee_minor,
         currency=payment.currency,
         commission_bps=payment.commission_bps,
         platform_fee_minor=payment.platform_fee_minor,

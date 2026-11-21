@@ -6,6 +6,7 @@ from app.core.dependencies import (
     DBSession,
     RequireRequester,
     RequireTutor,
+    RequireBookingAdmin,
 )
 from app.domain.tutoring_requests.schemas.matching_tutor import MatchingTutorResponse
 from app.domain.tutoring_requests.schemas.tutoring_request import (
@@ -169,3 +170,23 @@ async def get_matching_tutors(
         user=current_user,
         request_id=request_id,
     )
+
+
+@router.post(
+    "/mine/{request_id}/select-tutor/{tutor_profile_id}",
+    response_model=TutoringRequestResponse,
+)
+async def select_tutor_for_request(
+    request_id: uuid.UUID,
+    tutor_profile_id: uuid.UUID,
+    current_user: RequireRequester,
+    db: DBSession,
+):
+    return await TutoringRequestService(db).select_tutor(
+        current_user, request_id, tutor_profile_id
+    )
+
+
+@router.get("/admin", response_model=list[TutoringRequestResponse])
+async def list_all_tutoring_requests(_: RequireBookingAdmin, db: DBSession):
+    return await TutoringRequestService(db).list_admin_requests()

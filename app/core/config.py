@@ -28,6 +28,7 @@ class Settings(BaseSettings):
     PLATFORM_FEE_BPS: int = 0
     PAYMENT_PROVIDER: str = "NONE"
     PAYSTACK_SECRET_KEY: str = ""
+    PAYSTACK_PUBLIC_KEY: str = ""
     PAYSTACK_BASE_URL: str = "https://api.paystack.co"
     PAYSTACK_CALLBACK_URL: str = ""
     PAYSTACK_CHANNELS: str = "card,bank_transfer,ussd"

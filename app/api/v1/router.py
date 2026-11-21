@@ -1,4 +1,5 @@
 from fastapi import APIRouter
+from app.domain.agreements.routers.agreement_router import router as agreement_router
 
 from app.domain.authentication.routers.auth_router import router as auth_router
 from app.domain.learners.routers.learner_router import router as learner_router
@@ -7,6 +8,7 @@ from app.domain.notifications.routers.notification_router import (
     router as notification_router,
 )
 from app.domain.parents.routers.parent_router import router as parent_router
+from app.domain.progress_reports.routers.progress_report_router import router as progress_report_router
 from app.domain.payments.routers.payment_router import router as payment_router
 from app.domain.session_bookings.routers.booking_router import (
     router as session_booking_router,
@@ -26,8 +28,10 @@ from app.domain.verification.routers.verification_router import (
 api_router = APIRouter()
 
 api_router.include_router(auth_router)
+api_router.include_router(agreement_router)
 api_router.include_router(admin_tutor_router)
 api_router.include_router(parent_router)
+api_router.include_router(progress_report_router)
 api_router.include_router(payment_router)
 api_router.include_router(session_booking_router)
 api_router.include_router(notification_router)

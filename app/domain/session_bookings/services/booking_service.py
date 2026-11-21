@@ -10,7 +10,10 @@ from app.domain.authentication.models.user import User
 from app.domain.notifications.models.notification import NotificationType
 from app.domain.notifications.services.notification_service import NotificationService
 from app.domain.payments.models.payment import Payment, PaymentStatus
-from app.domain.payments.services.payment_service import PaymentService
+from app.domain.payments.services.commission_policy import (
+    build_monthly_commission_schedule,
+    completed_tenure_months,
+)
 from app.domain.session_bookings.models.lesson_booking import (
     BookingStatus,
     LessonBooking,
@@ -79,6 +82,11 @@ class BookingService:
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Your tutor verification must be approved.",
             )
+        if verification.approved_at is None:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Your tutor approval date is missing. Please contact Tutova support.",
+            )
 
         return tutor
 
@@ -137,6 +145,8 @@ class BookingService:
         user: User,
         request_id: uuid.UUID,
         payload: BookingCreate,
+        *,
+        payment_verified: bool = False,
     ) -> BookingResponse:
         await self._get_requester(user)
 
@@ -162,6 +172,29 @@ class BookingService:
                 status_code=status.HTTP_409_CONFLICT,
                 detail="This tutoring request has no assigned tutor.",
             )
+
+        if payload.monthly_arrangement_id is None:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    "Payment must be initialized and verified before a lesson booking can be created. "
+                    "Use the payment-first checkout flow."
+                ),
+            )
+
+        if not payment_verified:
+            paid_payment_id = await self.db.scalar(
+                select(Payment.id).where(
+                    Payment.monthly_arrangement_id == payload.monthly_arrangement_id,
+                    Payment.requester_user_id == user.id,
+                    Payment.status == PaymentStatus.PAID,
+                ).limit(1)
+            )
+            if paid_payment_id is None:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="A verified payment is required before creating this lesson booking.",
+                )
 
         start_at = payload.start_at.astimezone(timezone.utc)
 
@@ -246,11 +279,44 @@ class BookingService:
             period_end = next_month - timedelta(days=1)
             duration_months = payload.contract_months
             gross_amount_minor = monthly_fee_minor * duration_months
-            payment_policy = PaymentService(self.db)
-            completed_months_at_creation = await payment_policy._completed_booking_months(locked_tutor.id)
-            commission_bps = payment_policy._commission_bps(completed_months_at_creation)
-            platform_fee_minor = (gross_amount_minor * commission_bps + 5000) // 10000
-            tutor_earning_minor = gross_amount_minor - platform_fee_minor
+
+            verification = await self.db.scalar(
+                select(TutorVerification).where(
+                    TutorVerification.tutor_user_id == locked_tutor.user_id
+                )
+            )
+            if (
+                verification is None
+                or verification.status != VerificationStatus.APPROVED
+                or verification.approved_at is None
+            ):
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="The tutor must have a valid administrator approval date before an arrangement can be priced.",
+                )
+
+            commission_schedule = build_monthly_commission_schedule(
+                monthly_fee_minor=monthly_fee_minor,
+                duration_months=duration_months,
+                period_start=period_start,
+                tutor_approved_at=verification.approved_at,
+            )
+            completed_months_at_creation = completed_tenure_months(
+                verification.approved_at, period_start
+            )
+            commission_bps = int(commission_schedule[0]["commission_bps"])
+            platform_fee_minor = sum(
+                int(item["platform_fee_minor"]) for item in commission_schedule
+            )
+            tutor_commission_minor = sum(
+                int(item["tutor_commission_minor"]) for item in commission_schedule
+            )
+            learner_fee_minor = sum(
+                int(item["learner_fee_minor"]) for item in commission_schedule
+            )
+            tutor_earning_minor = sum(
+                int(item["tutor_earning_minor"]) for item in commission_schedule
+            )
             arrangement = MonthlyTutoringArrangement(
                 tutoring_request_id=request.id,
                 tutor_profile_id=locked_tutor.id,
@@ -259,8 +325,11 @@ class BookingService:
                 duration_months=duration_months,
                 commission_bps=commission_bps,
                 platform_fee_minor=platform_fee_minor,
+                tutor_commission_minor=tutor_commission_minor,
+                learner_fee_minor=learner_fee_minor,
                 tutor_earning_minor=tutor_earning_minor,
-                completed_months_at_creation=completed_months_at_creation.quantize(Decimal("0.01")),
+                commission_schedule=commission_schedule,
+                completed_months_at_creation=Decimal(completed_months_at_creation),
                 currency="NGN",
                 period_start=period_start,
                 period_end=period_end,
@@ -293,7 +362,7 @@ class BookingService:
 
         # The learner does not supply a meeting link.
         # The tutor may supply one when accepting the booking.
-        if request.tutoring_mode == TutoringMode.IN_PERSON:
+        if request.tutoring_mode in {TutoringMode.IN_PERSON, TutoringMode.HYBRID}:
             if request.location_id is None:
                 raise HTTPException(
                     status_code=status.HTTP_409_CONFLICT,
@@ -323,6 +392,16 @@ class BookingService:
 
         try:
             await self.bookings.create(booking)
+            await NotificationService(self.db).create(
+                user_id=locked_tutor.user_id,
+                notification_type=NotificationType.BOOKING_REQUEST_RECEIVED,
+                title="New paid lesson booking request",
+                message="A learner has completed payment and submitted a lesson booking for your review.",
+                data={
+                    "booking_id": str(booking.id),
+                    "tutoring_request_id": str(request.id),
+                },
+            )
             await self.bookings.commit()
             await self.db.refresh(booking)
 

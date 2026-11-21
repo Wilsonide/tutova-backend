@@ -12,6 +12,7 @@ from app.db.base import Base, TimestampMixin, UUIDPrimaryKeyMixin
 class TutoringMode(str, enum.Enum):
     ONLINE = "ONLINE"
     IN_PERSON = "IN_PERSON"
+    HYBRID = "HYBRID"
 
 
 class TutoringRequestStatus(str, enum.Enum):

@@ -77,13 +77,16 @@ class TutoringRequestRepository:
             TutorRequestResponse.decision == TutorResponseDecision.DECLINED,
         )
 
-        open_requests = and_(
+        # Generic requests are visible to eligible tutors until they respond.
+        # Direct requests are visible only to the tutor selected by the learner.
+        open_generic_requests = and_(
             TutoringRequest.status == TutoringRequestStatus.OPEN,
-            or_(
-                TutoringRequest.selected_tutor_id.is_(None),
-                TutoringRequest.selected_tutor_id == tutor_profile_id,
-            ),
+            TutoringRequest.selected_tutor_id.is_(None),
             TutoringRequest.id.not_in(declined_request_ids),
+        )
+        open_direct_requests = and_(
+            TutoringRequest.status == TutoringRequestStatus.OPEN,
+            TutoringRequest.selected_tutor_id == tutor_profile_id,
         )
 
         accepted_requests = and_(
@@ -100,7 +103,8 @@ class TutoringRequestRepository:
             )
             .where(
                 or_(
-                    open_requests,
+                    open_generic_requests,
+                    open_direct_requests,
                     accepted_requests,
                 )
             )

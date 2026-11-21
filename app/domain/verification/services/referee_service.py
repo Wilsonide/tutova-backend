@@ -346,6 +346,7 @@ class RefereeService:
                 verification.status = VerificationStatus.PENDING_REVIEW
                 verification.reviewed_by = None
                 verification.reviewed_at = None
+                verification.approved_at = None
                 verification.review_notes = None
             existing_reasons = list(verification.safeguarding_review_reasons or [])
             for reason in form.safeguarding_review_reasons:

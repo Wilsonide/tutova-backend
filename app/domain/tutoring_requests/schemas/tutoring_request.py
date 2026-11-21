@@ -42,8 +42,8 @@ class TutoringRequestCreate(BaseModel):
 
     @model_validator(mode="after")
     def validate_location(self):
-        if self.tutoring_mode == TutoringMode.IN_PERSON and self.location_id is None:
-            raise ValueError("A location is required for in-person tutoring.")
+        if self.tutoring_mode in {TutoringMode.IN_PERSON, TutoringMode.HYBRID} and self.location_id is None:
+            raise ValueError("A location is required for in-person or hybrid tutoring.")
 
         return self
 
@@ -69,6 +69,7 @@ class TutoringRequestResponse(BaseModel):
     # The selected tutor and accepted tutor are intentionally separate.
     selected_tutor_id: uuid.UUID | None
     assigned_tutor_id: uuid.UUID | None
+    selected_tutor_response: str | None = None
 
     accepted_at: datetime | None
     created_at: datetime
@@ -112,6 +113,7 @@ class TutorMatchingRequestResponse(BaseModel):
     status: TutoringRequestStatus
     selected_tutor_id: uuid.UUID | None = None
     assigned_tutor_id: uuid.UUID | None = None
+    my_response: str | None = None
 
 
 class TutorRequestDecisionResult(BaseModel):
