@@ -1,11 +1,12 @@
 import asyncio
 import hashlib
+import html
 import logging
 import secrets
 import smtplib
 import uuid
-from email.message import EmailMessage
 from datetime import UTC, datetime, timedelta
+from email.message import EmailMessage
 
 import jwt
 from sqlalchemy import func, select
@@ -21,8 +22,8 @@ from app.core.security import (
 )
 from app.domain.authentication.models import (
     AccountType,
-    RefreshSession,
     PasswordResetToken,
+    RefreshSession,
     User,
     UserRole,
     UserStatus,
@@ -33,9 +34,9 @@ from app.domain.authentication.repositories.refresh_session_repository import (
 from app.domain.authentication.repositories.user_repository import UserRepository
 from app.domain.authentication.schemas.auth import (
     ChangePasswordRequest,
+    ForgotPasswordRequest,
     LoginRequest,
     RegisterRequest,
-    ForgotPasswordRequest,
     ResetPasswordRequest,
 )
 
@@ -287,27 +288,265 @@ class AuthService:
         return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
     @staticmethod
-    def _send_password_reset_email(recipient: str, reset_url: str) -> None:
+    def _send_password_reset_email(
+        recipient: str,
+        reset_url: str,
+    ) -> None:
         message = EmailMessage()
         message["Subject"] = "Reset your Tutova password"
         message["From"] = settings.SMTP_FROM_EMAIL
         message["To"] = recipient
-        message.set_content(
-            "Hello,\\n\\n"
-            "We received a request to reset your Tutova password. "
-            "Use the secure link below to choose a new password:\\n\\n"
-            f"{reset_url}\\n\\n"
-            f"This link expires in {settings.PASSWORD_RESET_TOKEN_MINUTES} minutes "
-            "and can only be used once. If you did not request this change, "
-            "you can safely ignore this email. Your password will not change.\\n\\n"
+
+        expiry_minutes = settings.PASSWORD_RESET_TOKEN_MINUTES
+
+        # Escape the URL before inserting it into HTML.
+        safe_url = html.escape(reset_url, quote=True)
+
+        # Plain-text fallback for email clients that do not support HTML.
+        text_content = (
+            "Hello,\n\n"
+            "We received a request to reset your Tutova password.\n\n"
+            "Use the link below to choose a new password:\n"
+            f"{reset_url}\n\n"
+            f"This secure link expires in {expiry_minutes} minutes "
+            "and can only be used once.\n\n"
+            "If you did not request this change, you can safely "
+            "ignore this email. Your password will not change.\n\n"
             "The Tutova Team"
         )
 
-        with smtplib.SMTP(settings.SMTP_HOST, settings.SMTP_PORT, timeout=20) as smtp:
+        message.set_content(text_content)
+
+        # Structured HTML email.
+        html_content = f"""
+        <!DOCTYPE html>
+        <html lang="en">
+        <head>
+            <meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <title>Reset your Tutova password</title>
+        </head>
+        <body style="
+            margin: 0;
+            padding: 0;
+            background-color: #F4F8FB;
+            font-family: Arial, Helvetica, sans-serif;
+            color: #263445;
+        ">
+            <table
+                role="presentation"
+                width="100%"
+                cellspacing="0"
+                cellpadding="0"
+                border="0"
+                style="background-color: #F4F8FB; padding: 35px 15px;"
+            >
+                <tr>
+                    <td align="center">
+                        <table
+                            role="presentation"
+                            width="100%"
+                            cellspacing="0"
+                            cellpadding="0"
+                            border="0"
+                            style="
+                                max-width: 560px;
+                                background-color: #ffffff;
+                                border-radius: 12px;
+                                overflow: hidden;
+                            "
+                        >
+                            <tr>
+                                <td style="
+                                    background-color: #102A56;
+                                    padding: 28px 35px;
+                                    text-align: center;
+                                ">
+                                    <h1 style="
+                                        margin: 0;
+                                        color: #ffffff;
+                                        font-size: 28px;
+                                        font-weight: bold;
+                                    ">
+                                        Tutova
+                                    </h1>
+                                    <p style="
+                                        margin: 8px 0 0;
+                                        color: #DCE8F7;
+                                        font-size: 13px;
+                                    ">
+                                        The right tutor. A brighter future.
+                                    </p>
+                                </td>
+                            </tr>
+
+                            <tr>
+                                <td style="padding: 35px;">
+                                    <h2 style="
+                                        margin: 0 0 18px;
+                                        color: #102A56;
+                                        font-size: 22px;
+                                    ">
+                                        Reset your password
+                                    </h2>
+
+                                    <p style="
+                                        font-size: 15px;
+                                        line-height: 1.7;
+                                        margin: 0 0 16px;
+                                    ">
+                                        Hello,
+                                    </p>
+
+                                    <p style="
+                                        font-size: 15px;
+                                        line-height: 1.7;
+                                        margin: 0 0 24px;
+                                    ">
+                                        We received a request to reset your
+                                        Tutova password. Click the button below
+                                        to choose a new password.
+                                    </p>
+
+                                    <table
+                                        role="presentation"
+                                        cellspacing="0"
+                                        cellpadding="0"
+                                        border="0"
+                                        align="center"
+                                        style="margin: 0 auto 25px;"
+                                    >
+                                        <tr>
+                                            <td
+                                                align="center"
+                                                bgcolor="#0077E6"
+                                                style="border-radius: 7px;"
+                                            >
+                                                <a
+                                                    href="{safe_url}"
+                                                    target="_blank"
+                                                    style="
+                                                        display: inline-block;
+                                                        padding: 14px 30px;
+                                                        color: #ffffff;
+                                                        text-decoration: none;
+                                                        font-size: 15px;
+                                                        font-weight: bold;
+                                                    "
+                                                >
+                                                    Reset My Password
+                                                </a>
+                                            </td>
+                                        </tr>
+                                    </table>
+
+                                    <p style="
+                                        font-size: 13px;
+                                        line-height: 1.7;
+                                        color: #64748B;
+                                        margin: 0 0 12px;
+                                    ">
+                                        If the button does not work, copy and
+                                        paste this link into your browser:
+                                    </p>
+
+                                    <p style="
+                                        font-size: 13px;
+                                        line-height: 1.7;
+                                        word-break: break-all;
+                                        margin: 0 0 24px;
+                                    ">
+                                        <a
+                                            href="{safe_url}"
+                                            target="_blank"
+                                            style="color: #0077E6;"
+                                        >
+                                            {safe_url}
+                                        </a>
+                                    </p>
+
+                                    <table
+                                        role="presentation"
+                                        width="100%"
+                                        cellspacing="0"
+                                        cellpadding="0"
+                                        border="0"
+                                        style="
+                                            background-color: #F4F8FB;
+                                            border-radius: 7px;
+                                        "
+                                    >
+                                        <tr>
+                                            <td style="
+                                                padding: 16px;
+                                                font-size: 13px;
+                                                line-height: 1.7;
+                                                color: #526174;
+                                            ">
+                                                <strong>Security notice</strong>
+                                                <br>
+                                                This link expires in
+                                                {expiry_minutes} minutes and
+                                                can only be used once.
+
+                                                If you did not request a password
+                                                reset, you can safely ignore
+                                                this email. Your password
+                                                will not change.
+                                            </td>
+                                        </tr>
+                                    </table>
+
+                                    <p style="
+                                        margin: 28px 0 0;
+                                        font-size: 14px;
+                                        line-height: 1.7;
+                                    ">
+                                        Best regards,<br>
+                                        <strong style="color: #102A56;">
+                                            The Tutova Team
+                                        </strong>
+                                    </p>
+                                </td>
+                            </tr>
+
+                            <tr>
+                                <td style="
+                                    padding: 20px;
+                                    background-color: #F8FAFC;
+                                    text-align: center;
+                                    color: #94A3B8;
+                                    font-size: 12px;
+                                ">
+                                    © Tutova. All rights reserved.
+                                    <br>
+                                    This is an automated security email.
+                                </td>
+                            </tr>
+                        </table>
+                    </td>
+                </tr>
+            </table>
+        </body>
+        </html>
+        """
+
+        message.add_alternative(html_content, subtype="html")
+
+        with smtplib.SMTP(
+            settings.SMTP_HOST,
+            settings.SMTP_PORT,
+            timeout=20,
+        ) as smtp:
             if settings.SMTP_USE_TLS:
                 smtp.starttls()
+
             if settings.SMTP_USERNAME:
-                smtp.login(settings.SMTP_USERNAME, settings.SMTP_PASSWORD)
+                smtp.login(
+                    settings.SMTP_USERNAME,
+                    settings.SMTP_PASSWORD,
+                )
+
             smtp.send_message(message)
 
     async def request_password_reset(self, payload: ForgotPasswordRequest) -> None:
@@ -337,10 +576,12 @@ class AuthService:
 
         try:
             previous_tokens = await self.db.scalars(
-                select(PasswordResetToken).where(
+                select(PasswordResetToken)
+                .where(
                     PasswordResetToken.user_id == user.id,
                     PasswordResetToken.used_at.is_(None),
-                ).with_for_update()
+                )
+                .with_for_update()
             )
             for previous in previous_tokens:
                 previous.used_at = now
@@ -349,7 +590,8 @@ class AuthService:
             reset_token = PasswordResetToken(
                 user_id=user.id,
                 token_hash=self._hash_reset_token(raw_token),
-                expires_at=now + timedelta(minutes=settings.PASSWORD_RESET_TOKEN_MINUTES),
+                expires_at=now
+                + timedelta(minutes=settings.PASSWORD_RESET_TOKEN_MINUTES),
             )
             self.db.add(reset_token)
             await self.db.commit()
@@ -358,8 +600,7 @@ class AuthService:
             raise
 
         reset_url = (
-            f"{settings.FRONTEND_BASE_URL.rstrip('/')}/reset-password"
-            f"?token={raw_token}"
+            f"{settings.FRONTEND_BASE_URL.rstrip('/')}/reset-password?token={raw_token}"
         )
         try:
             await asyncio.to_thread(
@@ -382,7 +623,9 @@ class AuthService:
                 .with_for_update()
             )
             if reset_token is None or reset_token.used_at is not None:
-                raise AuthenticationError("This password reset link is invalid or has expired.")
+                raise AuthenticationError(
+                    "This password reset link is invalid or has expired."
+                )
 
             expires_at = reset_token.expires_at
             if expires_at.tzinfo is None:
@@ -390,11 +633,15 @@ class AuthService:
             if expires_at <= now:
                 reset_token.used_at = now
                 await self.db.commit()
-                raise AuthenticationError("This password reset link is invalid or has expired.")
+                raise AuthenticationError(
+                    "This password reset link is invalid or has expired."
+                )
 
             user = await self.users.get_by_id(reset_token.user_id)
             if user is None:
-                raise AuthenticationError("This password reset link is invalid or has expired.")
+                raise AuthenticationError(
+                    "This password reset link is invalid or has expired."
+                )
 
             user.password_hash = hash_password(payload.new_password)
             user.must_change_password = False
@@ -403,11 +650,13 @@ class AuthService:
             await self.sessions.revoke_all_for_user(user.id)
 
             other_tokens = await self.db.scalars(
-                select(PasswordResetToken).where(
+                select(PasswordResetToken)
+                .where(
                     PasswordResetToken.user_id == user.id,
                     PasswordResetToken.id != reset_token.id,
                     PasswordResetToken.used_at.is_(None),
-                ).with_for_update()
+                )
+                .with_for_update()
             )
             for other in other_tokens:
                 other.used_at = now
