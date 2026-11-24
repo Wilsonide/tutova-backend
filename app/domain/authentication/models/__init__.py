@@ -1,4 +1,5 @@
 from app.domain.authentication.models.refresh_session import RefreshSession
+from app.domain.authentication.models.password_reset_token import PasswordResetToken
 from app.domain.authentication.models.user import (
     AccountType,
     User,
@@ -9,6 +10,7 @@ from app.domain.authentication.models.user import (
 __all__ = [
     "AccountType",
     "RefreshSession",
+    "PasswordResetToken",
     "User",
     "UserRole",
     "UserStatus",

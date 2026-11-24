@@ -78,6 +78,8 @@ class TutorProfile(Base, UUIDPrimaryKeyMixin, TimestampMixin):
         back_populates="tutors",
     )
 
+    user = relationship("User")
+
 
 from app.domain.tutors.models.tutor_location import tutor_locations
 from app.domain.tutors.models.tutor_subject import tutor_subjects

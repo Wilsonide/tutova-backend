@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import func, select, update
+from sqlalchemy import case, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.notifications.models.notification import Notification
@@ -34,26 +34,22 @@ class NotificationRepository:
         )
         return list(result.scalars().all())
 
-    async def count_for_user(
+    async def count_summary_for_user(
         self,
         user_id: uuid.UUID,
-    ) -> int:
+    ) -> tuple[int, int]:
+        """Fetch total and unread counts with one aggregate query."""
         result = await self.db.execute(
-            select(func.count(Notification.id)).where(Notification.user_id == user_id)
+            select(
+                func.count(Notification.id),
+                func.coalesce(
+                    func.sum(case((Notification.read_at.is_(None), 1), else_=0)),
+                    0,
+                ),
+            ).where(Notification.user_id == user_id)
         )
-        return result.scalar_one()
-
-    async def count_unread_for_user(
-        self,
-        user_id: uuid.UUID,
-    ) -> int:
-        result = await self.db.execute(
-            select(func.count(Notification.id)).where(
-                Notification.user_id == user_id,
-                Notification.read_at.is_(None),
-            )
-        )
-        return result.scalar_one()
+        total, unread = result.one()
+        return int(total), int(unread)
 
     async def get_for_user(
         self,

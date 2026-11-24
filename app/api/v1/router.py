@@ -9,6 +9,7 @@ from app.domain.notifications.routers.notification_router import (
 )
 from app.domain.parents.routers.parent_router import router as parent_router
 from app.domain.progress_reports.routers.progress_report_router import router as progress_report_router
+from app.domain.progress_logs.routers.progress_log_router import router as progress_log_router
 from app.domain.payments.routers.payment_router import router as payment_router
 from app.domain.session_bookings.routers.booking_router import (
     router as session_booking_router,
@@ -32,6 +33,7 @@ api_router.include_router(agreement_router)
 api_router.include_router(admin_tutor_router)
 api_router.include_router(parent_router)
 api_router.include_router(progress_report_router)
+api_router.include_router(progress_log_router)
 api_router.include_router(payment_router)
 api_router.include_router(session_booking_router)
 api_router.include_router(notification_router)

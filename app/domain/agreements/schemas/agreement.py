@@ -1,5 +1,5 @@
 import uuid
-from datetime import datetime
+from datetime import date, datetime
 from pydantic import BaseModel, ConfigDict, Field
 from app.domain.agreements.models.tutoring_agreement import AgreementStatus
 
@@ -32,3 +32,9 @@ class AgreementResponse(BaseModel):
     learner_notes: str | None
     created_at: datetime
     updated_at: datetime
+    tutor_name: str | None = None
+    requester_name: str | None = None
+    learner_name: str | None = None
+    contract_start_date: date | None = None
+    contract_end_date: date | None = None
+    venue: str | None = None

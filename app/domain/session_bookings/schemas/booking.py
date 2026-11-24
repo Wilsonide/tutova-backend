@@ -91,6 +91,12 @@ class BookingResponse(BaseModel):
     admin_reviewed_by_user_id: uuid.UUID | None
     admin_review_notes: str | None
 
+    # Display fields populated by list endpoints to avoid one API call per tutor.
+    tutor_name: str | None = None
+    tutor_profile_picture_url: str | None = None
+    requester_name: str | None = None
+    subject_name: str | None = None
+
 
 class BookingDispute(BaseModel):
     reason: str = Field(min_length=10, max_length=2000)

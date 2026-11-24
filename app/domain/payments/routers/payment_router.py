@@ -1,9 +1,9 @@
 import uuid
 from datetime import date
 
-from fastapi import APIRouter, Header, HTTPException, Query, Request, status
+from fastapi import APIRouter, BackgroundTasks, Header, HTTPException, Query, Request, status
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import or_, select
 
 from app.core.dependencies import (
     CurrentUser,
@@ -30,6 +30,7 @@ from app.domain.payments.schemas.payment import (
 )
 from app.domain.payments.services.payment_service import PaymentService
 from app.domain.session_bookings.schemas.booking import BookingCreate
+from app.domain.tutors.models.tutor_profile import TutorProfile
 
 router = APIRouter(prefix="/payments", tags=["Payments"])
 
@@ -104,28 +105,43 @@ async def list_my_payments(current_user: CurrentUser, db: DBSession):
 
 
 @router.post("/webhook", status_code=status.HTTP_200_OK)
-async def paystack_webhook(request: Request, db: DBSession):
+async def paystack_webhook(
+    request: Request,
+    db: DBSession,
+    background_tasks: BackgroundTasks,
+):
     await PaymentService(db).handle_webhook(
-        await request.body(), request.headers.get("x-paystack-signature")
+        await request.body(),
+        request.headers.get("x-paystack-signature"),
+        background_tasks,
     )
     return {"success": True}
 
 
 @router.post("/reference/{reference}/verify", response_model=PaymentResponse)
 async def verify_payment_reference(
-    reference: str, current_user: CurrentUser, db: DBSession
+    reference: str,
+    current_user: CurrentUser,
+    db: DBSession,
+    background_tasks: BackgroundTasks,
 ):
     service = PaymentService(db)
     payment = await db.scalar(
-        select(Payment).where(Payment.provider_reference == reference)
+        select(Payment).where(
+            Payment.provider_reference == reference,
+            or_(
+                Payment.requester_user_id == current_user.id,
+                Payment.tutor_profile_id.in_(
+                    select(TutorProfile.id).where(
+                        TutorProfile.user_id == current_user.id
+                    )
+                ),
+            ),
+        )
     )
     if payment is None:
         raise HTTPException(status_code=404, detail="Payment not found.")
-    if not any(
-        item.id == payment.id for item in await service.list_for_user(current_user)
-    ):
-        raise HTTPException(status_code=403, detail="You cannot verify this payment.")
-    return await service.verify_reference(reference)
+    return await service.verify_reference(reference, background_tasks)
 
 
 # Tutor payout destination. Raw bank account number is sent to Paystack and is not stored by Tutova.
@@ -257,10 +273,19 @@ async def verify_refund(refund_id: uuid.UUID, _: RequireBookingAdmin, db: DBSess
 
 @router.get("/{payment_id}", response_model=PaymentResponse)
 async def get_payment(payment_id: uuid.UUID, current_user: CurrentUser, db: DBSession):
-    payment = await db.get(Payment, payment_id)
+    payment = await db.scalar(
+        select(Payment).where(
+            Payment.id == payment_id,
+            or_(
+                Payment.requester_user_id == current_user.id,
+                Payment.tutor_profile_id.in_(
+                    select(TutorProfile.id).where(
+                        TutorProfile.user_id == current_user.id
+                    )
+                ),
+            ),
+        )
+    )
     if payment is None:
         raise HTTPException(status_code=404, detail="Payment not found.")
-    visible = await PaymentService(db).list_for_user(current_user)
-    if not any(item.id == payment.id for item in visible):
-        raise HTTPException(status_code=403, detail="You cannot access this payment.")
     return payment

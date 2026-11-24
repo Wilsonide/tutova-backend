@@ -1,83 +1,39 @@
-# Tutova workflow implementation notes
+# Tutova password reset, daily progress log, and commission policy update
 
-## Commission policy
+## Commission policy (current policy for newly created arrangements and payments)
 
-Tutor tenure starts at `TutorVerification.approved_at`, set when an administrator approves the tutor. Existing approved tutors are backfilled from `reviewed_at` where available.
+The total Tutova commission is based on completed calendar months since the tutor approval date. The parent/adult learner always pays a flat 5% of the agreed tutoring amount. The tutor contributes the balance of the total commission from the tutor's agreed earnings.
 
-Monthly commission snapshots use these total platform rates, split equally between tutor and learner:
+- New tutor, first month: 20% total (15% tutor contribution + 5% parent fee).
+- Relatively new tutor, after one month and before three months: 15% total (10% tutor contribution + 5% parent fee).
+- Returning tutor, from completion of three months: 10% total (5% tutor contribution + 5% parent fee).
 
-- First month after approval: 25% total (12.5% tutor deduction + 12.5% learner fee).
-- From one month until before three months: 20% total (10% + 10%).
-- From completion of three months onward: 15% total (7.5% + 7.5%).
+The three-month tier starts on the exact three-month anniversary of administrator approval. Each new monthly arrangement stores an immutable monthly schedule, including the total commission rate, fixed 5% parent fee rate, and monetary split. Existing arrangements, payments, and historical snapshots are not repriced or rewritten.
 
-The monthly snapshots are retained on the arrangement/payment records so later tenure changes do not rewrite prior periods.
+## Password reset
 
-## Request and booking paths
+- Added `POST /api/v1/auth/forgot-password` and `POST /api/v1/auth/reset-password`.
+- Added `/forgot-password` and `/reset-password?token=...` frontend pages.
+- Reset tokens are cryptographically random, stored as SHA-256 hashes, expire after 30 minutes by default, and can only be used once.
+- Resetting a password revokes all refresh sessions for that user.
+- The forgot-password endpoint returns a generic response and applies a 60-second account cooldown.
+- SMTP and `FRONTEND_BASE_URL` must be configured for email delivery.
 
-### Direct tutor request
+## Daily progress log
 
-1. Learner selects a tutor and a subject from that tutor's taught subjects.
-2. The request is created and admin is notified. The direct request is not placed in the generic matching queue.
-3. Learner proposes the exact lesson time/duration and creates the booking.
-4. Learner pays through Paystack while the booking is awaiting tutor confirmation.
-5. Only after the verified payment is marked paid is the selected tutor notified to accept or decline the exact booking.
-6. Tutor acceptance creates the agreement draft for tutor review; learner approval signs it and confirms the booking.
+- Added a chat-style progress room for each accepted tutoring request.
+- Tutors and parents/adult learners can post daily updates, milestones, questions, and concerns.
+- Entries use the Africa/Lagos calendar date and are ordered chronologically.
+- Admins can supervise, review, flag, annotate, and resolve entries.
+- The room refreshes using regular HTTP polling; no WebSockets are required.
+- Existing per-lesson progress reports are retained for compatibility.
 
-The profile request form still captures the initial preferred schedule as free text. The structured date/time and duration are collected in the subsequent booking step, and payment is collected immediately after that structured booking is created.
+## Database migration
 
-### Generic request
+The password reset and progress log migration remains `d8f4a1c9b2e7` (parent `c6f2a9d1e840`). This commission policy update changes business logic and JSON snapshots only; it does not require a new database migration.
 
-1. Learner submits a generic request.
-2. Matching tutors may express interest; the request remains open while the learner reviews responses.
-3. Learner selects one accepting tutor.
-4. The selected tutor is assigned; other interested tutors are notified that the opportunity has been taken.
-5. Learner creates the dated booking and pays.
-6. Verified payment notifies the selected tutor and admin; the tutor can then accept/decline the exact booking.
-7. Tutor acceptance creates the agreement draft; tutor review and learner approval complete the agreement.
-
-## Agreements
-
-New agreements snapshot subject, schedule, duration, venue/meeting link, booking amount, monthly commission breakdown and per-month commission schedule. Tutor can accept or propose a revised date/time/duration/venue/meeting link. The learner must approve the reviewed terms. A booking is not confirmed until the learner accepts the agreement.
-
-If the learner declines after paying, the booking is cancelled and admins are notified to review the payment/refund. No automatic refund is issued.
-
-## Progress reports and disputes
-
-New bookings require one tutor report and one learner/parent report after the tutor marks a lesson completed. The learner cannot acknowledge completion until both reports exist. Reports are visible to the participants and administrators. Reporting an issue places the booking into `DISPUTED` and notifies admins.
-
-Admin may return a reviewed dispute to learner acknowledgement or cancel the booking. Admin review does not impersonate the learner: the learner must still acknowledge completion manually. Unresolved disputes and unacknowledged lessons remain ineligible for payout.
-
-Existing bookings are backfilled with `progress_reports_required = false` to preserve their previous acknowledgement flow.
-
-## Admin monthly payouts
-
-`POST /api/v1/payments/admin/payouts/prepare-month?period_start=YYYY-MM-DD` accepts any date in the target calendar month. It prepares admin-reviewable payout records for eligible contract-month windows. It does not transfer money automatically. Admins continue through the existing Paystack process/verification/OTP finalisation workflow.
-
-Eligibility remains subject to month-end, all lessons in that contract month being completed and learner-acknowledged, and no unresolved dispute/admin review.
-
-## Important API additions
-
-- `POST /api/v1/tutoring-requests/mine/{request_id}/select-tutor/{tutor_profile_id}`
-- `GET /api/v1/tutoring-requests/admin`
-- `GET /api/v1/session-bookings/admin`
-- `POST /api/v1/session-bookings/admin/{booking_id}/resolve-dispute`
-- `GET /api/v1/payments/admin`
-- `POST /api/v1/payments/admin/payouts/prepare-month`
-- `GET /api/v1/agreements/mine`
-- `POST /api/v1/agreements/{agreement_id}/tutor-accept`
-- `POST /api/v1/agreements/{agreement_id}/tutor-request-changes`
-- `POST /api/v1/agreements/{agreement_id}/learner-decision`
-- `POST /api/v1/progress-reports/bookings/{booking_id}`
-- `GET /api/v1/progress-reports/bookings/{booking_id}`
-- `GET /api/v1/progress-reports/admin`
-- `PATCH /api/v1/progress-reports/admin/{report_id}/review`
-
-## Apply migrations
-
-Back up the database, then run:
+Run from the backend project directory:
 
 ```powershell
 uv run alembic upgrade head
 ```
-
-The latest migration head is `f6b2c8d4a910`.

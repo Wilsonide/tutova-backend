@@ -1,12 +1,13 @@
 import uuid
 from datetime import datetime, timezone
 
-from fastapi import HTTPException
+from fastapi import BackgroundTasks, HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.domain.authentication.models.user import User, UserRole, UserStatus
+from app.core.email_service import send_tutor_request_response_to_learner
 from app.domain.learners.models.learner_profile import LearnerProfile
 from app.domain.locations.models.location import Location
 from app.domain.notifications.models.notification import NotificationType
@@ -429,13 +430,32 @@ class TutoringRequestService:
 
         requests = await self.requests.list_for_requester(user.id)
         response_rows: list[TutoringRequestResponse] = []
+        selected_request_ids = [
+            request.id for request in requests if request.selected_tutor_id is not None
+        ]
+        selected_tutor_ids = {
+            request.selected_tutor_id
+            for request in requests
+            if request.selected_tutor_id is not None
+        }
+        response_by_pair: dict[tuple[uuid.UUID, uuid.UUID], TutorRequestResponseModel] = {}
+        if selected_request_ids and selected_tutor_ids:
+            response_models = await self.db.scalars(
+                select(TutorRequestResponseModel).where(
+                    TutorRequestResponseModel.tutoring_request_id.in_(selected_request_ids),
+                    TutorRequestResponseModel.tutor_profile_id.in_(selected_tutor_ids),
+                )
+            )
+            response_by_pair = {
+                (item.tutoring_request_id, item.tutor_profile_id): item
+                for item in response_models
+            }
 
         for request in requests:
             response = TutoringRequestResponse.model_validate(request)
             if request.selected_tutor_id is not None:
-                tutor_response = await self.requests.get_tutor_response(
-                    request_id=request.id,
-                    tutor_profile_id=request.selected_tutor_id,
+                tutor_response = response_by_pair.get(
+                    (request.id, request.selected_tutor_id)
                 )
                 response.selected_tutor_response = (
                     tutor_response.decision.value if tutor_response else None
@@ -525,6 +545,21 @@ class TutoringRequestService:
         }
 
         matched: list[TutorMatchingRequestResponse] = []
+        response_by_request_id: dict[uuid.UUID, TutorRequestResponseModel] = {}
+        location_match_cache: dict[uuid.UUID | None, bool] = {}
+
+        if requests:
+            response_rows = await self.db.scalars(
+                select(TutorRequestResponseModel).where(
+                    TutorRequestResponseModel.tutoring_request_id.in_(
+                        [request.id for request in requests]
+                    ),
+                    TutorRequestResponseModel.tutor_profile_id == tutor.id,
+                )
+            )
+            response_by_request_id = {
+                row.tutoring_request_id: row for row in response_rows
+            }
 
         for request in requests:
             request_status = str(
@@ -553,10 +588,11 @@ class TutoringRequestService:
                     continue
 
                 if mode in {TutoringMode.IN_PERSON.value, TutoringMode.HYBRID.value}:
-                    if not await self._tutor_serves_location(
-                        tutor,
-                        request.location_id,
-                    ):
+                    if request.location_id not in location_match_cache:
+                        location_match_cache[request.location_id] = (
+                            await self._tutor_serves_location(tutor, request.location_id)
+                        )
+                    if not location_match_cache[request.location_id]:
                         continue
             else:
                 mode = str(
@@ -575,10 +611,7 @@ class TutoringRequestService:
                 else None
             )
 
-            my_response = await self.requests.get_tutor_response(
-                request_id=request.id,
-                tutor_profile_id=tutor.id,
-            )
+            my_response = response_by_request_id.get(request.id)
             matched.append(
                 TutorMatchingRequestResponse(
                     id=request.id,
@@ -613,6 +646,7 @@ class TutoringRequestService:
         user: User,
         request_id: uuid.UUID,
         decision: str,
+        background_tasks: BackgroundTasks | None = None,
     ) -> TutorRequestDecisionResult:
         tutor = await self._get_verified_tutor(user)
 
@@ -748,7 +782,34 @@ class TutoringRequestService:
                     },
                 )
 
+            requester = await self.db.get(User, request.requester_user_id)
             await self.requests.commit()
+
+            if background_tasks is not None and requester is not None:
+                should_email = (
+                    response_decision == TutorResponseDecision.ACCEPTED
+                    or request.selected_tutor_id is not None
+                )
+                if should_email:
+                    background_tasks.add_task(
+                        send_tutor_request_response_to_learner,
+                        requester.email,
+                        f"{user.first_name} {user.last_name}".strip() or "Your tutor",
+                        decision,
+                        str(request.id),
+                        (
+                            "The tutor is interested. Review their response and select "
+                            "a tutor to continue."
+                            if decision == "ACCEPT" and request.selected_tutor_id is None
+                            else (
+                                "Your selected tutor accepted your request. You can now "
+                                "continue to the booking arrangement."
+                                if decision == "ACCEPT"
+                                else "Your selected tutor is unavailable for this request. "
+                                "You can review your request and consider another tutor."
+                            )
+                        ),
+                    )
 
             if decision == "ACCEPT":
                 message = ("You have accepted this direct tutoring request." if request.selected_tutor_id is not None else "You have expressed interest. The learner will review your response.")
@@ -810,21 +871,26 @@ class TutoringRequestService:
             message="The learner selected you. You can now proceed with the booking arrangement.",
             data={"tutoring_request_id": str(request.id), "tutor_profile_id": str(tutor.id)},
         )
-        other_responses = list((await self.db.scalars(select(TutorRequestResponseModel).where(
-            TutorRequestResponseModel.tutoring_request_id == request.id,
-            TutorRequestResponseModel.decision == TutorResponseDecision.ACCEPTED,
-            TutorRequestResponseModel.tutor_profile_id != tutor.id,
-        ))).all())
-        for other in other_responses:
-            other_tutor = await self.db.get(TutorProfile, other.tutor_profile_id)
-            if other_tutor:
-                await notifications.create(
-                    user_id=other_tutor.user_id,
-                    notification_type=NotificationType.NEW_MATCHING_REQUEST,
-                    title="Tutoring opportunity has been taken",
-                    message="The learner selected another tutor for this request. Thank you for your interest.",
-                    data={"tutoring_request_id": str(request.id), "selected_tutor_profile_id": str(tutor.id)},
-                )
+        other_tutor_user_ids = await self.db.scalars(
+            select(TutorProfile.user_id)
+            .join(
+                TutorRequestResponseModel,
+                TutorRequestResponseModel.tutor_profile_id == TutorProfile.id,
+            )
+            .where(
+                TutorRequestResponseModel.tutoring_request_id == request.id,
+                TutorRequestResponseModel.decision == TutorResponseDecision.ACCEPTED,
+                TutorRequestResponseModel.tutor_profile_id != tutor.id,
+            )
+        )
+        for other_tutor_user_id in other_tutor_user_ids:
+            await notifications.create(
+                user_id=other_tutor_user_id,
+                notification_type=NotificationType.NEW_MATCHING_REQUEST,
+                title="Tutoring opportunity has been taken",
+                message="The learner selected another tutor for this request. Thank you for your interest.",
+                data={"tutoring_request_id": str(request.id), "selected_tutor_profile_id": str(tutor.id)},
+            )
         await self.requests.commit()
         await self.db.refresh(request)
         return request
@@ -834,9 +900,14 @@ class TutoringRequestService:
         request: TutoringRequest,
         selected_tutor_profile_id: uuid.UUID | None = None,
     ) -> None:
+        mode = request.tutoring_mode.value
         query = (
             select(TutorProfile)
             .join(User, TutorProfile.user_id == User.id)
+            .join(
+                TutorVerification,
+                TutorVerification.tutor_user_id == User.id,
+            )
             .options(
                 selectinload(TutorProfile.subjects),
                 selectinload(TutorProfile.locations),
@@ -844,48 +915,35 @@ class TutoringRequestService:
             .where(
                 User.role == UserRole.TUTOR,
                 User.status == UserStatus.ACTIVE,
+                TutorVerification.status == VerificationStatus.APPROVED,
             )
         )
 
         if selected_tutor_profile_id is not None:
             query = query.where(TutorProfile.id == selected_tutor_profile_id)
+        else:
+            query = query.where(
+                TutorProfile.subjects.any(Subject.id == request.subject_id),
+                TutorProfile.tutoring_modes.contains([mode]),
+            )
+            if mode in {TutoringMode.IN_PERSON.value, TutoringMode.HYBRID.value}:
+                ancestor_ids = await self._get_location_ancestor_ids(
+                    request.location_id
+                ) if request.location_id is not None else set()
+                if not ancestor_ids:
+                    return
+                query = query.where(
+                    TutorProfile.locations.any(
+                        (Location.id.in_(ancestor_ids))
+                        & (Location.is_active.is_(True))
+                    )
+                )
 
         result = await self.db.execute(query)
         tutors = result.scalars().unique().all()
-
-        verification_result = await self.db.execute(
-            select(TutorVerification.tutor_user_id).where(
-                TutorVerification.status == VerificationStatus.APPROVED
-            )
-        )
-        verified_user_ids = set(verification_result.scalars().all())
-
         notifications = NotificationService(self.db)
 
         for tutor in tutors:
-            if tutor.user_id not in verified_user_ids:
-                continue
-
-            if request.subject_id not in {subject.id for subject in tutor.subjects}:
-                continue
-
-            supported_modes = {
-                str(getattr(mode, "value", mode)).upper()
-                for mode in (tutor.tutoring_modes or [])
-            }
-
-            mode = request.tutoring_mode.value
-
-            if mode not in supported_modes:
-                continue
-
-            if mode in {TutoringMode.IN_PERSON.value, TutoringMode.HYBRID.value}:
-                if not await self._tutor_serves_location(
-                    tutor,
-                    request.location_id,
-                ):
-                    continue
-
             await notifications.create(
                 user_id=tutor.user_id,
                 notification_type=NotificationType.NEW_MATCHING_REQUEST,
@@ -903,9 +961,7 @@ class TutoringRequestService:
                         "and teaching preferences."
                     )
                 ),
-                data={
-                    "tutoring_request_id": str(request.id),
-                },
+                data={"tutoring_request_id": str(request.id)},
             )
 
     async def list_matching_tutors(
@@ -960,37 +1016,32 @@ class TutoringRequestService:
             requested_location.name if requested_location else None
         )
 
-        candidates = await self.requests.list_discoverable_tutors()
+        requested_mode = request.tutoring_mode.value
+        candidates = await self.requests.list_discoverable_tutors(
+            subject_id=request.subject_id,
+            tutoring_mode=requested_mode,
+            selected_tutor_id=request.selected_tutor_id,
+        )
+        requested_ancestor_ids: set[uuid.UUID] = set()
+        if (
+            requested_mode in {TutoringMode.IN_PERSON.value, TutoringMode.HYBRID.value}
+            and request.location_id is not None
+        ):
+            requested_ancestor_ids = await self._get_location_ancestor_ids(
+                request.location_id
+            )
 
         matches: list[MatchingTutorResponse] = []
-        requested_mode = request.tutoring_mode.value
 
         for tutor, tutor_user in candidates:
-            if (
-                request.selected_tutor_id is not None
-                and tutor.id != request.selected_tutor_id
-            ):
-                continue
-
-            tutor_subject_ids = {subject.id for subject in tutor.subjects}
-
-            supported_modes = {
-                str(getattr(mode, "value", mode)).upper()
-                for mode in (tutor.tutoring_modes or [])
+            tutor_location_ids = {
+                location.id for location in tutor.locations if location.is_active
             }
-
-            if request.subject_id not in tutor_subject_ids:
-                continue
-
-            if requested_mode not in supported_modes:
-                continue
-
             location_matches = True
 
             if requested_mode in {TutoringMode.IN_PERSON.value, TutoringMode.HYBRID.value}:
-                location_matches = await self._tutor_serves_location(
-                    tutor,
-                    request.location_id,
+                location_matches = bool(
+                    tutor_location_ids.intersection(requested_ancestor_ids)
                 )
 
             match_level = "STRONG" if location_matches else "PARTIAL"

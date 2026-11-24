@@ -1,4 +1,5 @@
 from app.domain.authentication.models.refresh_session import RefreshSession
+from app.domain.authentication.models.password_reset_token import PasswordResetToken
 from app.domain.authentication.models.user import User
 from app.domain.agreements.models.tutoring_agreement import TutoringAgreement
 from app.domain.learners.models.learner_profile import LearnerProfile
@@ -6,6 +7,7 @@ from app.domain.locations.models.location import Location
 from app.domain.notifications.models.notification import Notification
 from app.domain.parents.models.parent_profile import ParentProfile
 from app.domain.progress_reports.models.progress_report import ProgressReport
+from app.domain.progress_logs.models.progress_log_entry import ProgressLogEntry
 from app.domain.payments.models.payment import Payment  # noqa: F401
 from app.domain.payments.models.payout import (  # noqa: F401
     PaymentRefund,
@@ -37,11 +39,13 @@ __all__ = [
     "Notification",
     "ParentProfile",
     "ProgressReport",
+    "ProgressLogEntry",
     "Payment",
     "PayoutRecipient",
     "TutorPayout",
     "PaymentRefund",
     "RefreshSession",
+    "PasswordResetToken",
     "Subject",
     "TutorProfile",
     "TutorRequestResponse",

@@ -56,20 +56,20 @@ def completed_tenure_months(approved_at: datetime, as_of: datetime | date) -> in
 
 
 def commission_bps_for_tenure(completed_months: int | Decimal) -> int:
-    """25% in month one; 20% after month one until month three; 15% from month three."""
+    """20% in month one; 15% after month one until month three; 10% from month three."""
     months = Decimal(str(completed_months))
     if months < 1:
-        return 2500
-    if months < 3:
         return 2000
-    return 1500
+    if months < 3:
+        return 1500
+    return 1000
 
 
 def split_monthly_commission(gross_tutor_fee_minor: int, commission_bps: int) -> dict[str, int]:
-    """Split total commission equally, assigning any odd kobo to learner share."""
+    """Charge parents a flat 5%; the tutor covers the remaining commission."""
     total = (gross_tutor_fee_minor * commission_bps + 5000) // 10000
-    tutor_share = total // 2
-    learner_share = total - tutor_share
+    learner_share = (gross_tutor_fee_minor * 500 + 5000) // 10000
+    tutor_share = total - learner_share
     return {
         "platform_fee_minor": total,
         "tutor_commission_minor": tutor_share,
@@ -110,6 +110,7 @@ def build_monthly_commission_schedule(
                 "period_end": month_end.isoformat(),
                 "tenure_months": tenure_months,
                 "commission_bps": bps,
+                "parent_fee_bps": 500,
                 "tutoring_amount_minor": monthly_fee_minor,
                 **split,
             }

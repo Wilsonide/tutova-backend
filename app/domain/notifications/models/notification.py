@@ -6,6 +6,7 @@ from sqlalchemy import (
     JSON,
     DateTime,
     ForeignKey,
+    Index,
     String,
     Text,
     Uuid,
@@ -36,6 +37,8 @@ class NotificationType(str, enum.Enum):
     SESSION_ACKNOWLEDGED = "SESSION_ACKNOWLEDGED"
     SESSION_DISPUTED = "SESSION_DISPUTED"
     PROGRESS_REPORT_SUBMITTED = "PROGRESS_REPORT_SUBMITTED"
+    PROGRESS_LOG_ENTRY = "PROGRESS_LOG_ENTRY"
+    PROGRESS_LOG_CONCERN = "PROGRESS_LOG_CONCERN"
     ADMIN_NEW_TUTORING_REQUEST = "ADMIN_NEW_TUTORING_REQUEST"
     AGREEMENT_SIGNED = "AGREEMENT_SIGNED"
     AGREEMENT_READY_FOR_LEARNER = "AGREEMENT_READY_FOR_LEARNER"
@@ -48,6 +51,9 @@ class Notification(
     Base,
 ):
     __tablename__ = "notifications"
+    __table_args__ = (
+        Index("ix_notifications_user_created_at", "user_id", "created_at"),
+    )
 
     user_id: Mapped[uuid.UUID] = mapped_column(
         Uuid(as_uuid=True),

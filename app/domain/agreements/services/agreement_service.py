@@ -11,6 +11,7 @@ from app.domain.notifications.models.notification import NotificationType
 from app.domain.notifications.services.notification_service import NotificationService
 from app.domain.payments.models.payment import Payment, PaymentStatus
 from app.domain.session_bookings.models.lesson_booking import LessonBooking, BookingStatus
+from app.domain.tutoring_requests.models.tutoring_request import TutoringRequest
 from app.domain.session_bookings.repositories.booking_repository import BookingRepository
 from app.domain.tutors.models.tutor_profile import TutorProfile
 from app.domain.tutoring_requests.models.tutoring_request import TutoringRequest, TutoringMode
@@ -76,14 +77,97 @@ class AgreementService:
         return agreement
 
     async def list_mine(self, user: User):
-        query=select(TutoringAgreement).order_by(TutoringAgreement.created_at.desc())
+        query = (
+            select(TutoringAgreement)
+            .options(
+                selectinload(TutoringAgreement.tutor).selectinload(TutorProfile.user),
+                selectinload(TutoringAgreement.requester),
+                selectinload(TutoringAgreement.tutoring_request).selectinload(TutoringRequest.learner),
+                selectinload(TutoringAgreement.booking).selectinload(LessonBooking.monthly_arrangement),
+                selectinload(TutoringAgreement.booking).selectinload(LessonBooking.location),
+            )
+            .order_by(TutoringAgreement.created_at.desc())
+        )
         if user.role == UserRole.TUTOR:
-            query=query.where(TutoringAgreement.tutor_profile_id.in_(select(TutorProfile.id).where(TutorProfile.user_id==user.id)))
+            query = query.where(
+                TutoringAgreement.tutor_profile_id.in_(
+                    select(TutorProfile.id).where(TutorProfile.user_id == user.id)
+                )
+            )
         elif user.role in {UserRole.PARENT, UserRole.ADULT_LEARNER}:
-            query=query.where(TutoringAgreement.requester_user_id==user.id)
+            query = query.where(TutoringAgreement.requester_user_id == user.id)
         elif user.role not in {UserRole.ADMIN, UserRole.SUPER_ADMIN}:
-            raise HTTPException(403,"You cannot view tutoring agreements.")
-        return list((await self.db.scalars(query)).all())
+            raise HTTPException(403, "You cannot view tutoring agreements.")
+
+        agreements = list((await self.db.scalars(query)).all())
+        response = []
+        for agreement in agreements:
+            tutor_user = agreement.tutor.user if agreement.tutor else None
+            requester = agreement.requester
+            request = agreement.tutoring_request
+            booking = agreement.booking
+            learner = request.learner if request else None
+            arrangement = booking.monthly_arrangement if booking else None
+
+            tutor_name = (
+                f"{tutor_user.first_name} {tutor_user.last_name}".strip()
+                if tutor_user else "Tutor"
+            )
+            requester_name = (
+                f"{requester.first_name} {requester.last_name}".strip()
+                if requester else "Learner"
+            )
+            learner_name = (
+                f"{learner.first_name} {learner.last_name}".strip()
+                if learner else (
+                    requester_name if requester and requester.role == UserRole.ADULT_LEARNER
+                    else None
+                )
+            )
+
+            if arrangement:
+                contract_start = arrangement.period_start
+                contract_end = arrangement.period_end
+            elif booking:
+                # A single-lesson booking has a one-day service period.
+                contract_start = booking.start_at.date()
+                contract_end = booking.end_at.date()
+            else:
+                contract_start = contract_end = None
+
+            venue = None
+            if booking and booking.location:
+                venue = booking.location.name
+            elif booking and booking.meeting_link:
+                venue = "Online lesson"
+            else:
+                venue = (agreement.terms or {}).get("venue") or "To be confirmed"
+
+            item = {
+                "id": agreement.id,
+                "booking_id": agreement.booking_id,
+                "tutoring_request_id": agreement.tutoring_request_id,
+                "requester_user_id": agreement.requester_user_id,
+                "tutor_profile_id": agreement.tutor_profile_id,
+                "status": agreement.status,
+                "revision": agreement.revision,
+                "terms": agreement.terms,
+                "revision_history": agreement.revision_history,
+                "tutor_reviewed_at": agreement.tutor_reviewed_at,
+                "learner_accepted_at": agreement.learner_accepted_at,
+                "tutor_notes": agreement.tutor_notes,
+                "learner_notes": agreement.learner_notes,
+                "created_at": agreement.created_at,
+                "updated_at": agreement.updated_at,
+                "tutor_name": tutor_name,
+                "requester_name": requester_name,
+                "learner_name": learner_name,
+                "contract_start_date": contract_start,
+                "contract_end_date": contract_end,
+                "venue": venue,
+            }
+            response.append(item)
+        return response
 
     async def tutor_accept(self, user: User, agreement_id: uuid.UUID):
         tutor_id=await self.db.scalar(select(TutorProfile.id).where(TutorProfile.user_id==user.id))

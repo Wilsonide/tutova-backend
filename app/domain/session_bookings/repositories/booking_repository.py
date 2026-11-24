@@ -3,6 +3,7 @@ from datetime import datetime
 
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from app.domain.authentication.models.user import User, UserRole, UserStatus
 from app.domain.session_bookings.models.lesson_booking import (
@@ -10,6 +11,7 @@ from app.domain.session_bookings.models.lesson_booking import (
     LessonBooking,
 )
 from app.domain.tutors.models.tutor_profile import TutorProfile
+from app.domain.tutoring_requests.models.tutoring_request import TutoringRequest
 
 ACTIVE_BOOKING_STATUSES = (
     BookingStatus.PENDING_TUTOR_CONFIRMATION,
@@ -110,6 +112,15 @@ class BookingRepository:
     ):
         statement = (
             select(LessonBooking)
+            .options(
+                selectinload(LessonBooking.tutor_profile).selectinload(
+                    TutorProfile.user
+                ),
+                selectinload(LessonBooking.requester),
+                selectinload(LessonBooking.tutoring_request).selectinload(
+                    TutoringRequest.subject
+                ),
+            )
             .where(
                 or_(
                     LessonBooking.requester_user_id == user_id,

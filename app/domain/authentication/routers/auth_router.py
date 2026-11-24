@@ -9,6 +9,8 @@ from app.core.dependencies import get_current_user
 from app.domain.authentication.models import User
 from app.domain.authentication.schemas import (
     ChangePasswordRequest,
+    ForgotPasswordRequest,
+    ResetPasswordRequest,
     LoginRequest,
     MessageResponse,
     RegisterRequest,
@@ -157,6 +159,36 @@ async def change_password(
 
     return MessageResponse(
         message="Password changed successfully. Please sign in again."
+    )
+
+
+
+@router.post("/forgot-password", response_model=MessageResponse)
+async def forgot_password(
+    payload: ForgotPasswordRequest,
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    await AuthService(db).request_password_reset(payload)
+    return MessageResponse(
+        message=(
+            "If an account exists for that email address, and email delivery is "
+            "available, password reset instructions will be sent shortly."
+        )
+    )
+
+
+@router.post("/reset-password", response_model=MessageResponse)
+async def reset_password(
+    payload: ResetPasswordRequest,
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    try:
+        await AuthService(db).reset_password(payload)
+    except AuthenticationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    return MessageResponse(
+        message="Your password has been reset. Please sign in with your new password."
     )
 
 

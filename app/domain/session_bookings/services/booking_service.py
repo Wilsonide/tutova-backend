@@ -2,11 +2,17 @@ import uuid
 from datetime import date, datetime, timedelta, timezone
 from decimal import ROUND_HALF_UP, Decimal
 
-from fastapi import HTTPException, status
+from fastapi import BackgroundTasks, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.authentication.models.user import User
+from app.domain.agreements.models.tutoring_agreement import TutoringAgreement
+from app.core.email_service import (
+    send_booking_confirmation_to_learner,
+    send_booking_created_to_tutor,
+    send_tutor_booking_response_to_learner,
+)
 from app.domain.notifications.models.notification import NotificationType
 from app.domain.notifications.services.notification_service import NotificationService
 from app.domain.payments.models.payment import Payment, PaymentStatus
@@ -147,6 +153,8 @@ class BookingService:
         payload: BookingCreate,
         *,
         payment_verified: bool = False,
+        background_tasks: BackgroundTasks | None = None,
+        commit_transaction: bool = True,
     ) -> BookingResponse:
         await self._get_requester(user)
 
@@ -402,8 +410,55 @@ class BookingService:
                     "tutoring_request_id": str(request.id),
                 },
             )
-            await self.bookings.commit()
-            await self.db.refresh(booking)
+            await NotificationService(self.db).create(
+                user_id=user.id,
+                notification_type=NotificationType.BOOKING_PAYMENT_CONFIRMED,
+                title="Your payment is confirmed",
+                message=(
+                    "Your payment was verified and your lesson booking request "
+                    "has been sent to the tutor for review."
+                ),
+                data={
+                    "booking_id": str(booking.id),
+                    "tutoring_request_id": str(request.id),
+                },
+            )
+            tutor_user = (
+                await self.db.get(User, locked_tutor.user_id)
+                if commit_transaction and background_tasks is not None
+                else None
+            )
+            if commit_transaction:
+                await self.bookings.commit()
+                await self.db.refresh(booking)
+            else:
+                # PaymentService owns this transaction so the booking, payment
+                # status, and notification are committed atomically.
+                await self.db.flush()
+
+            # Emails are queued only after the owning transaction commits.
+            if commit_transaction and background_tasks is not None:
+                if tutor_user is not None:
+                    background_tasks.add_task(
+                        send_booking_created_to_tutor,
+                        tutor_user.email,
+                        f"{user.first_name} {user.last_name}".strip() or "A learner",
+                        str(booking.id),
+                        booking.start_at,
+                        booking.duration_minutes,
+                    )
+                background_tasks.add_task(
+                    send_booking_confirmation_to_learner,
+                    user.email,
+                    (
+                        f"{tutor_user.first_name} {tutor_user.last_name}".strip()
+                        if tutor_user is not None
+                        else "your tutor"
+                    ),
+                    str(booking.id),
+                    booking.start_at,
+                    booking.duration_minutes,
+                )
 
             return BookingResponse.model_validate(booking)
 
@@ -427,7 +482,41 @@ class BookingService:
             offset=offset,
         )
 
-        return [BookingResponse.model_validate(booking) for booking in bookings]
+        responses: list[BookingResponse] = []
+        for booking in bookings:
+            tutor_user = booking.tutor_profile.user if booking.tutor_profile else None
+            requester = booking.requester
+            subject = (
+                booking.tutoring_request.subject
+                if booking.tutoring_request is not None
+                else None
+            )
+            picture_url = None
+            if booking.tutor_profile is not None and booking.tutor_profile.profile_picture_key:
+                from app.core.cloudinary_service import get_tutor_profile_picture_url
+
+                picture_url = get_tutor_profile_picture_url(
+                    booking.tutor_profile.profile_picture_key
+                )
+            response = BookingResponse.model_validate(booking).model_copy(
+                update={
+                    "tutor_name": (
+                        f"{tutor_user.first_name} {tutor_user.last_name}".strip()
+                        if tutor_user is not None
+                        else None
+                    ),
+                    "tutor_profile_picture_url": picture_url,
+                    "requester_name": (
+                        f"{requester.first_name} {requester.last_name}".strip()
+                        if requester is not None
+                        else None
+                    ),
+                    "subject_name": subject.name if subject is not None else None,
+                }
+            )
+            responses.append(response)
+
+        return responses
 
     # ---------------------------------------------------------
     # Get booking
@@ -465,6 +554,7 @@ class BookingService:
         user: User,
         booking_id: uuid.UUID,
         payload: BookingAccept,
+        background_tasks: BackgroundTasks | None = None,
     ) -> BookingResponse:
         tutor = await self._get_verified_tutor(user)
 
@@ -486,6 +576,20 @@ class BookingService:
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail="This booking is not awaiting your acceptance.",
+            )
+
+        agreement_exists = await self.db.scalar(
+            select(TutoringAgreement.id).where(
+                TutoringAgreement.booking_id == booking.id
+            )
+        )
+        if agreement_exists is not None:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    "This booking requires agreement review. Open the Tutoring "
+                    "Agreements page to accept the terms or request changes."
+                ),
             )
 
         if booking.start_at <= datetime.now(timezone.utc):
@@ -570,9 +674,30 @@ class BookingService:
         try:
             booking.status = BookingStatus.CONFIRMED
             booking.confirmed_at = datetime.now(timezone.utc)
+            requester = await self.db.get(User, booking.requester_user_id)
+            await NotificationService(self.db).create(
+                user_id=booking.requester_user_id,
+                notification_type=NotificationType.BOOKING_ACCEPTED,
+                title="Your tutor accepted the booking",
+                message="Your tutor accepted the lesson booking. Review the confirmed session details.",
+                data={
+                    "booking_id": str(booking.id),
+                    "tutoring_request_id": str(booking.tutoring_request_id),
+                },
+            )
 
             await self.bookings.commit()
             await self.db.refresh(booking)
+
+            if background_tasks is not None and requester is not None:
+                background_tasks.add_task(
+                    send_tutor_booking_response_to_learner,
+                    requester.email,
+                    f"{user.first_name} {user.last_name}".strip() or "Your tutor",
+                    "ACCEPT",
+                    str(booking.id),
+                    booking.start_at,
+                )
 
             return BookingResponse.model_validate(booking)
 
@@ -682,6 +807,7 @@ class BookingService:
         user: User,
         booking_id: uuid.UUID,
         reason: str | None = None,
+        background_tasks: BackgroundTasks | None = None,
     ) -> BookingResponse:
         booking = await self.bookings.get_by_id_for_update(booking_id)
 
@@ -692,7 +818,8 @@ class BookingService:
             )
 
         # New workflow: the assigned tutor declines the booking.
-        if booking.status == BookingStatus.PENDING_TUTOR_CONFIRMATION:
+        tutor_is_declining = booking.status == BookingStatus.PENDING_TUTOR_CONFIRMATION
+        if tutor_is_declining:
             tutor = await self._get_verified_tutor(user)
 
             if booking.tutor_profile_id != tutor.id:
@@ -720,9 +847,39 @@ class BookingService:
         try:
             booking.status = BookingStatus.DECLINED
             booking.cancellation_reason = reason
+            requester = None
+            if tutor_is_declining:
+                requester = await self.db.get(User, booking.requester_user_id)
+                await NotificationService(self.db).create(
+                    user_id=booking.requester_user_id,
+                    notification_type=NotificationType.BOOKING_DECLINED,
+                    title="Your tutor declined the booking",
+                    message=(
+                        "Your tutor is unable to accept this lesson booking. "
+                        "Please review your booking and contact support if you need help."
+                    ),
+                    data={
+                        "booking_id": str(booking.id),
+                        "tutoring_request_id": str(booking.tutoring_request_id),
+                    },
+                )
 
             await self.bookings.commit()
             await self.db.refresh(booking)
+
+            if (
+                tutor_is_declining
+                and background_tasks is not None
+                and requester is not None
+            ):
+                background_tasks.add_task(
+                    send_tutor_booking_response_to_learner,
+                    requester.email,
+                    f"{user.first_name} {user.last_name}".strip() or "Your tutor",
+                    "DECLINE",
+                    str(booking.id),
+                    booking.start_at,
+                )
 
             return BookingResponse.model_validate(booking)
 

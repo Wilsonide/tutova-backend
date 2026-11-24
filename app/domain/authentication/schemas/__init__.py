@@ -1,5 +1,7 @@
 from app.domain.authentication.schemas.auth import (
     ChangePasswordRequest,
+    ForgotPasswordRequest,
+    ResetPasswordRequest,
     LoginRequest,
     MessageResponse,
     RegisterRequest,
@@ -9,6 +11,8 @@ from app.domain.authentication.schemas.user import UserResponse
 
 __all__ = [
     "ChangePasswordRequest",
+    "ForgotPasswordRequest",
+    "ResetPasswordRequest",
     "LoginRequest",
     "MessageResponse",
     "RegisterRequest",

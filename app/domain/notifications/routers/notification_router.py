@@ -52,7 +52,6 @@ async def mark_notification_read(
         notification_id=notification_id,
     )
 
-    await db.commit()
     return result
 
 
@@ -70,5 +69,4 @@ async def mark_all_notifications_read(
         user_id=current_user.id,
     )
 
-    await db.commit()
     return result

@@ -48,6 +48,8 @@ class PaymentResponse(BaseModel):
     status: PaymentStatus
     paid_at: datetime | None
     created_at: datetime
+    tutor_name: str | None = None
+    tutor_profile_picture_url: str | None = None
 
 from pydantic import Field
 from app.domain.payments.models.payout import PayoutStatus, RefundStatus

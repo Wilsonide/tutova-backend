@@ -1,6 +1,6 @@
 import uuid
 
-from fastapi import APIRouter, Query, status
+from fastapi import APIRouter, BackgroundTasks, Query, status
 
 from app.core.dependencies import (
     CurrentUser,
@@ -44,6 +44,7 @@ async def create_booking(
     payload: BookingCreate,
     current_user: RequireRequester,
     db: DBSession,
+    background_tasks: BackgroundTasks,
 ):
     service = BookingService(db)
 
@@ -51,6 +52,7 @@ async def create_booking(
         current_user,
         request_id,
         payload,
+        background_tasks=background_tasks,
     )
 
 
@@ -114,6 +116,7 @@ async def accept_booking(
     payload: BookingAccept,
     current_user: RequireTutor,
     db: DBSession,
+    background_tasks: BackgroundTasks,
 ):
     service = BookingService(db)
 
@@ -121,6 +124,7 @@ async def accept_booking(
         current_user,
         booking_id,
         payload,
+        background_tasks,
     )
 
 
@@ -138,6 +142,7 @@ async def decline_booking(
     payload: BookingDecline,
     current_user: RequireTutor,
     db: DBSession,
+    background_tasks: BackgroundTasks,
 ):
     service = BookingService(db)
 
@@ -145,6 +150,7 @@ async def decline_booking(
         current_user,
         booking_id,
         payload.reason,
+        background_tasks,
     )
 
 

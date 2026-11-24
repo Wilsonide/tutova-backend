@@ -1,6 +1,6 @@
 import uuid
 
-from fastapi import APIRouter, Query, status
+from fastapi import APIRouter, BackgroundTasks, Query, status
 
 from app.core.dependencies import (
     DBSession,
@@ -147,6 +147,7 @@ async def respond_to_tutoring_request(
     payload: TutorRequestDecision,
     current_user: RequireTutor,
     db: DBSession,
+    background_tasks: BackgroundTasks,
 ):
     service = TutoringRequestService(db)
 
@@ -154,6 +155,7 @@ async def respond_to_tutoring_request(
         current_user,
         request_id,
         payload.decision,
+        background_tasks,
     )
 
 

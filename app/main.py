@@ -2,10 +2,12 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy import text
 
 from app.api.v1.router import api_router
 from app.core.config import settings
 from app.core.database import close_database
+from app.core.dependencies import DBSession
 
 
 @asynccontextmanager
@@ -26,7 +28,7 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=settings.CORS_ORIGINS,
+    allow_origins=settings.cors_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -46,3 +48,15 @@ async def root():
         "message": "Welcome to Tutova API",
         "version": "1.0.0",
     }
+
+
+
+@app.get("/health", tags=["System"])
+async def health():
+    return {"success": True, "status": "healthy"}
+
+
+@app.get("/ready", tags=["System"])
+async def readiness(db: DBSession):
+    await db.execute(text("SELECT 1"))
+    return {"success": True, "status": "ready", "database": "connected"}

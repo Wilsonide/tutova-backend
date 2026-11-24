@@ -1,4 +1,5 @@
 from functools import lru_cache
+from urllib.parse import urlparse
 
 from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -46,6 +47,11 @@ class Settings(BaseSettings):
     SMTP_PASSWORD: str = ""
     SMTP_FROM_EMAIL: str = ""
     SMTP_USE_TLS: bool = True
+    PASSWORD_RESET_TOKEN_MINUTES: int = 30
+    DB_POOL_SIZE: int = 5
+    DB_MAX_OVERFLOW: int = 5
+    DB_POOL_TIMEOUT_SECONDS: int = 30
+    DB_POOL_RECYCLE_SECONDS: int = 1800
 
     @field_validator("JWT_SECRET_KEY")
     @classmethod
@@ -67,11 +73,40 @@ class Settings(BaseSettings):
             )
         if self.PAYSTACK_TIMEOUT_SECONDS <= 0:
             raise ValueError("PAYSTACK_TIMEOUT_SECONDS must be positive")
+        if self.PASSWORD_RESET_TOKEN_MINUTES <= 0:
+            raise ValueError("PASSWORD_RESET_TOKEN_MINUTES must be positive")
+        if self.DB_POOL_SIZE < 1 or self.DB_MAX_OVERFLOW < 0:
+            raise ValueError("Database pool size must be positive and overflow non-negative")
+        if self.DB_POOL_TIMEOUT_SECONDS <= 0 or self.DB_POOL_RECYCLE_SECONDS <= 0:
+            raise ValueError("Database pool timeout and recycle values must be positive")
         if self.ENVIRONMENT.lower() == "production":
             if self.JWT_SECRET_KEY == "development-only-change-this-secret-key-now":
                 raise ValueError("Set a unique JWT_SECRET_KEY in production")
             if not self.COOKIE_SECURE:
                 raise ValueError("COOKIE_SECURE must be true in production")
+            frontend_url = self.FRONTEND_BASE_URL.strip()
+            if not frontend_url.startswith("https://"):
+                raise ValueError("FRONTEND_BASE_URL must use HTTPS in production")
+            origins = self.cors_origins
+            if not origins or "*" in origins:
+                raise ValueError("CORS_ORIGINS must contain explicit origins in production")
+            if any(not origin.startswith("https://") for origin in origins):
+                raise ValueError("Every production CORS_ORIGINS entry must use HTTPS")
+            if not self.SMTP_HOST.strip() or not self.SMTP_FROM_EMAIL.strip():
+                raise ValueError("SMTP_HOST and SMTP_FROM_EMAIL are required in production")
+            if self.SMTP_USERNAME.strip() and not self.SMTP_PASSWORD:
+                raise ValueError("SMTP_PASSWORD is required when SMTP_USERNAME is configured")
+            if not 1 <= self.SMTP_PORT <= 65535:
+                raise ValueError("SMTP_PORT must be between 1 and 65535")
+            if self.PAYMENT_PROVIDER.upper() == "PAYSTACK":
+                if not self.PAYSTACK_CALLBACK_URL.strip():
+                    raise ValueError("PAYSTACK_CALLBACK_URL is required when Paystack is enabled in production")
+                callback = urlparse(self.PAYSTACK_CALLBACK_URL.strip())
+                frontend = urlparse(frontend_url)
+                if callback.scheme != "https" or not callback.netloc:
+                    raise ValueError("PAYSTACK_CALLBACK_URL must be an absolute HTTPS URL in production")
+                if callback.netloc != frontend.netloc:
+                    raise ValueError("PAYSTACK_CALLBACK_URL must use the same host as FRONTEND_BASE_URL")
         return self
 
     @property

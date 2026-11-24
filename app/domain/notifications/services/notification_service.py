@@ -61,8 +61,7 @@ class NotificationService:
             offset=offset,
         )
 
-        total = await self.repository.count_for_user(user_id)
-        unread_count = await self.repository.count_unread_for_user(user_id)
+        total, unread_count = await self.repository.count_summary_for_user(user_id)
 
         return {
             "items": items,

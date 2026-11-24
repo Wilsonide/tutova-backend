@@ -20,6 +20,40 @@ A feature-first FastAPI modular monolith for a safeguarding-first tutoring marke
 5. Start: `uvicorn app.main:app --reload`.
 6. Visit `/docs`, `/health`, and `/ready`.
 
+
+
+## Launch configuration and operational checks
+
+Copy `.env.example` to `.env` and configure the values in your hosting provider's
+secret/environment settings. Never commit `.env` or paste live credentials into
+source files.
+
+For a production deployment:
+
+- Set `ENVIRONMENT=production`, `DEBUG=false`, `COOKIE_SECURE=true`, and a unique
+  `JWT_SECRET_KEY` of at least 32 characters.
+- Set `FRONTEND_BASE_URL` to the deployed frontend origin and set
+  `CORS_ORIGINS` to the exact allowed frontend origin(s), comma-separated.
+- Set `PAYSTACK_CALLBACK_URL` to the deployed frontend's payment callback page.
+  The backend passes this value to Paystack; it does not construct a production
+  redirect from a localhost/default URL.
+- Configure `SMTP_HOST`, `SMTP_PORT`, `SMTP_USERNAME`, `SMTP_PASSWORD`,
+  `SMTP_FROM_EMAIL`, and `SMTP_USE_TLS` for password-reset and booking/request
+  notification emails.
+- Review `DB_POOL_SIZE`, `DB_MAX_OVERFLOW`, `DB_POOL_TIMEOUT_SECONDS`, and
+  `DB_POOL_RECYCLE_SECONDS` against the connection limit on your Neon plan.
+- Run `alembic upgrade head` before deploying the new application version.
+
+`GET /health` reports that the API process is alive. `GET /ready` executes a
+database query and only reports ready when the configured database is reachable.
+The versioned `GET /api/v1/health` endpoint remains available.
+
+Booking creation, payment status, and the booking notification are committed in
+the same database transaction for the payment-first checkout path. A booking is
+created only after Paystack verification confirms the reference, amount, and
+currency. Email notifications are queued after the transaction commits; an SMTP
+failure does not roll back a paid booking.
+
 ## Create the first administrator
 
 Set `BOOTSTRAP_ADMIN_EMAIL` and `BOOTSTRAP_ADMIN_PASSWORD` in the environment, then run `python -m scripts.bootstrap_admin`. This command creates an ADMIN only if no account with that email exists. It does not expose a public admin registration route. Use a one-time secret and rotate credentials after initial provisioning.
@@ -37,7 +71,8 @@ Run `pytest`. Tests that need PostgreSQL should use an isolated test database; n
 - Access tokens are short-lived; refresh tokens are opaque random values stored only as SHA-256 hashes in the database and rotated on use.
 - Refresh cookies are HTTP-only. Set `COOKIE_SECURE=true` in production and serve only over HTTPS.
 - Configure exact CORS origins. Do not log secrets or provider payloads.
-- This foundation does not yet implement production-grade distributed rate limiting, email/SMS delivery, payment-provider integrations, or the complete safeguarding and accounting workflows. Add those before public launch.
+- Distributed rate limiting and SMS delivery are not included. Monitor authentication, payment, and upload endpoints and add infrastructure-level rate limiting before scaling.
+- Email delivery depends on a working SMTP provider and must be verified with real deployment credentials before launch.
 
 ## Outstanding business decisions
 
@@ -78,7 +113,11 @@ uv run uvicorn app.main:app --reload
 
 ## Payments (Paystack)
 
-Tutova collects lesson payments through Paystack. A tutor sets `hourly_rate` (NGN) on their tutor profile. When the tutor proposes a booking, the API snapshots that rate and calculates the gross lesson charge from `duration_minutes`; later tutor rate changes do not alter an existing booking price.
+Tutova collects lesson payments through Paystack. Tutor monthly fees and the
+applicable tenure-based commission split are snapshotted into a monthly tutoring
+arrangement. The learner's proposed lesson date, duration, and notes are stored
+on the pending payment until the provider confirms the transaction; a booking
+is not created before successful verification.
 
 Configure these environment variables before enabling checkout:
 
@@ -95,16 +134,32 @@ Configure the Paystack webhook URL as `https://your-api.example/api/v1/payments/
 
 ### Payment flow
 
-1. Tutor creates a tutor profile or updates it with `hourly_rate` in NGN (`PATCH /api/v1/tutors/profile`).
-2. Tutor proposes a lesson using `POST /api/v1/session-bookings/requests/{request_id}`. The response includes `hourly_rate`, `gross_amount_minor` (kobo), and `currency`.
-3. Parent/adult learner confirms the booking using `POST /api/v1/session-bookings/{booking_id}/confirm`.
-4. Requester initializes checkout using `POST /api/v1/payments/bookings/{booking_id}/initialize` with an `Idempotency-Key` header. The response includes the Paystack `checkout_url`.
-5. Frontend redirects to `checkout_url`. After payment, the frontend can verify using `POST /api/v1/payments/reference/{reference}/verify`; Paystack also notifies the webhook endpoint.
-6. Requester and tutor can view relevant transactions through `GET /api/v1/payments/mine`; a single transaction is available through `GET /api/v1/payments/{payment_id}`.
+1. A parent or adult learner submits a tutoring request. For a direct request, the
+   selected tutor accepts or declines it. For a general request, matching tutors
+   can express interest and the learner selects one tutor.
+2. Once the tutoring request is accepted and has an assigned tutor, the learner
+   initializes checkout with
+   `POST /api/v1/payments/requests/{request_id}/initialize`, sending the proposed
+   booking schedule in the request body and an `Idempotency-Key` header.
+3. The payment record stores the proposed schedule while `booking_id` remains
+   `NULL`. No lesson booking is created at this stage.
+4. The frontend redirects to the `checkout_url` returned by Paystack. Paystack
+   returns to the configured `PAYSTACK_CALLBACK_URL`; the backend independently
+   verifies the reference, amount, and currency. The Paystack webhook performs
+   the same server-to-server verification.
+5. Only after successful verification does the backend atomically mark the
+   payment as paid, create the booking, and record the tutor's in-app notification.
+   A failed, abandoned, or unverified payment does not create a booking.
+6. The tutor reviews the paid booking using
+   `POST /api/v1/session-bookings/{booking_id}/accept` or
+   `POST /api/v1/session-bookings/{booking_id}/decline`.
+7. Learners and tutors can view their transactions through
+   `GET /api/v1/payments/mine`; a single transaction is available through
+   `GET /api/v1/payments/{payment_id}`.
 
 ### Commission policy
 
-Commission is snapshotted at payment initialization and calculated from the tutor's previously completed, learner-acknowledged lesson hours: 25% at zero completed hours, 20% above zero through exactly 50 hours, and 15% above 50 hours. The remaining amount is recorded as tutor earnings. Historical transactions are never repriced when a tutor crosses a tier.
+Commission is based on completed calendar months since administrator approval and snapshotted when an arrangement or payment is created: 20% in the first month, 15% after one month and before three months, and 10% from the exact three-month approval anniversary. Parents/adult learners always pay a flat 5% of the agreed tutoring amount; the tutor contributes the remaining commission from agreed earnings. Historical transactions and existing arrangement snapshots are never repriced when a tutor crosses a tier.
 
 All Paystack amounts are integer kobo. The payment API only permits payment for confirmed bookings, checks the payer against the booking requester, and verifies provider reference, amount, and currency before recording a successful payment.
 

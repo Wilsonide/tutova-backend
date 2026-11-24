@@ -18,6 +18,7 @@ from app.domain.tutoring_requests.models.tutoring_request import (
     TutoringRequestStatus,
 )
 from app.domain.tutors.models.tutor_profile import TutorProfile
+from app.domain.subjects.models.subject import Subject
 from app.domain.verification.models.tutor_verification import (
     TutorVerification,
     VerificationStatus,
@@ -116,15 +117,19 @@ class TutoringRequestRepository:
 
     async def list_discoverable_tutors(
         self,
+        *,
+        subject_id: uuid.UUID,
+        tutoring_mode: str,
+        selected_tutor_id: uuid.UUID | None = None,
     ) -> list[tuple[TutorProfile, User]]:
         """
         Return active, verified tutors with their public user information.
 
-        Subject, location and teaching-mode matching is handled
-        by the service layer.
+        Subject and teaching-mode filtering is pushed into SQL; the service
+        computes the location match level from the already-loaded locations.
         """
 
-        result = await self.db.execute(
+        stmt = (
             select(TutorProfile, User)
             .join(
                 User,
@@ -142,10 +147,16 @@ class TutoringRequestRepository:
                 User.role == UserRole.TUTOR,
                 User.status == UserStatus.ACTIVE,
                 TutorVerification.status == VerificationStatus.APPROVED,
+                TutorProfile.subjects.any(
+                    Subject.id == subject_id
+                ),
+                TutorProfile.tutoring_modes.contains([tutoring_mode]),
             )
         )
+        if selected_tutor_id is not None:
+            stmt = stmt.where(TutorProfile.id == selected_tutor_id)
 
-        return list(result.unique().all())
+        return list((await self.db.execute(stmt)).unique().all())
 
     async def get_tutor_response(
         self,
