@@ -1,3 +1,4 @@
+from app.domain.tutor_background.models.background import Institution, TutorEducation, TutorCertification, TutorWorkHistory, TutorOnboardingDraft
 from app.domain.authentication.models.refresh_session import RefreshSession
 from app.domain.authentication.models.password_reset_token import PasswordResetToken
 from app.domain.authentication.models.user import User
@@ -54,6 +55,11 @@ __all__ = [
     "TutoringRequest",
     "TutoringAgreement",
     "User",
+    "Institution",
+    "TutorEducation",
+    "TutorCertification",
+    "TutorWorkHistory",
+    "TutorOnboardingDraft",
     "tutor_locations",
     "tutor_subjects",
 ]

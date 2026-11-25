@@ -22,6 +22,7 @@ from app.domain.tutors.routers.admin_tutor_router import (
     router as admin_tutor_router,
 )
 from app.domain.tutors.routers.tutor_router import router as tutor_router
+from app.domain.tutor_background.routers.background_router import router as tutor_background_router
 from app.domain.verification.routers.verification_router import (
     router as verification_router,
 )
@@ -40,6 +41,7 @@ api_router.include_router(notification_router)
 api_router.include_router(verification_router)
 api_router.include_router(tutoring_request_router)
 api_router.include_router(tutor_router)
+api_router.include_router(tutor_background_router)
 api_router.include_router(learner_router)
 api_router.include_router(location_router)
 api_router.include_router(subject_router)

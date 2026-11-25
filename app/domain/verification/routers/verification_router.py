@@ -17,6 +17,7 @@ from app.domain.verification.schemas.verification import (
     VerificationReviewRequest,
     VerificationStatusResponse,
     VerificationSubmission,
+    NdaAcceptanceRequest,
 )
 from app.domain.verification.schemas.referee import (
     RefereeConsentPageResponse,
@@ -106,6 +107,31 @@ async def review_safeguarding_flag(
     return result
 
 
+@router.get("/tutor/nda")
+async def get_tutor_nda(current_user: RequireTutor):
+    from app.core.config import settings
+    from app.domain.verification.nda import TUTOR_NDA_TEXT
+    return {"version": settings.CURRENT_NDA_VERSION, "content": TUTOR_NDA_TEXT}
+
+
+@router.post("/tutor/nda/accept", response_model=VerificationStatusResponse)
+async def accept_tutor_nda(
+    data: NdaAcceptanceRequest,
+    current_user: RequireTutor,
+    db: DBSession,
+    request: Request,
+):
+    client_ip = request.client.host if request.client else None
+    result = await VerificationService(db).accept_nda(
+        current_user,
+        data.version,
+        client_ip=client_ip,
+        user_agent=request.headers.get("user-agent"),
+    )
+    await db.commit()
+    return result
+
+
 @router.post(
     "/tutor/submit",
     response_model=VerificationStatusResponse,
@@ -115,8 +141,15 @@ async def submit_verification(
     data: VerificationSubmission,
     current_user: RequireTutor,
     db: DBSession,
+    request: Request,
 ):
-    result = await VerificationService(db).submit(current_user, data)
+    client_ip = request.client.host if request.client else None
+    result = await VerificationService(db).submit(
+        current_user,
+        data,
+        client_ip=client_ip,
+        user_agent=request.headers.get("user-agent"),
+    )
     await db.commit()
     return result
 

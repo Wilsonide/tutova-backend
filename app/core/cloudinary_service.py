@@ -647,3 +647,58 @@ def delete_tutor_identity_document(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail="Could not delete the identity document from storage.",
         ) from exc
+
+# ---------------------------------------------------------------------
+# Tutor education and certification documents: authenticated raw assets
+# ---------------------------------------------------------------------
+
+def upload_tutor_background_document(
+    content: bytes,
+    tutor_user_id: str,
+    content_type: str,
+) -> dict:
+    configure_cloudinary()
+    allowed_extensions = ALLOWED_IDENTITY_DOCUMENT_TYPES.get(content_type)
+    if not allowed_extensions or not _validate_file_signature(content, content_type):
+        raise HTTPException(
+            status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
+            detail="Background documents must be valid PDF, JPEG, or PNG files.",
+        )
+    extension = allowed_extensions[0]
+    public_id = f"tutova/tutor-background/{tutor_user_id}/{uuid.uuid4().hex}.{extension}"
+    try:
+        uploaded = cloudinary.uploader.upload(
+            BytesIO(content), resource_type="raw", type="authenticated",
+            public_id=public_id, overwrite=False, use_filename=False,
+            unique_filename=False,
+        )
+        if not isinstance(uploaded, dict) or not uploaded.get("public_id"):
+            raise RuntimeError("Cloudinary returned an unexpected upload response.")
+        file_format = (uploaded.get("format") or extension).lower().lstrip(".")
+        if file_format not in {"pdf", "jpg", "jpeg", "png"}:
+            raise RuntimeError("Cloudinary returned an unsupported document format.")
+        return {"public_id": uploaded["public_id"], "format": file_format}
+    except Exception as exc:
+        logger.exception("Tutor background document upload failed.")
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Could not securely upload the background document.",
+        ) from exc
+
+
+def get_tutor_background_document_download_url(public_id: str, file_format: str) -> str:
+    configure_cloudinary()
+    if not public_id or file_format not in {"pdf", "jpg", "jpeg", "png"}:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Background document is unavailable.")
+    try:
+        expires_at = int(time.time()) + settings.CLOUDINARY_IDENTITY_DOCUMENT_URL_TTL_SECONDS
+        return private_download_url(
+            public_id, file_format, resource_type="raw", type="authenticated",
+            expires_at=expires_at, attachment=True,
+        )
+    except Exception as exc:
+        logger.exception("Could not generate tutor background document URL.")
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Could not generate the secure document download link.",
+        ) from exc

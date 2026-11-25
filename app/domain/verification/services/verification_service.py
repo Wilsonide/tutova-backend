@@ -140,10 +140,45 @@ class VerificationService:
             detail=" ".join(details),
         )
 
+    async def accept_nda(
+        self,
+        user: User,
+        version: str,
+        *,
+        client_ip: str | None = None,
+        user_agent: str | None = None,
+    ) -> TutorVerification:
+        self._require_tutor(user)
+        if version != settings.CURRENT_NDA_VERSION:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="The NDA has been updated. Reload the agreement and review the current version.",
+            )
+        verification = await self.verifications.get_by_tutor_for_update(user.id)
+        if verification is None:
+            verification = TutorVerification(tutor_user_id=user.id)
+            self.db.add(verification)
+            await self.db.flush()
+        if verification.status in (VerificationStatus.PENDING_REVIEW, VerificationStatus.APPROVED):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="The NDA cannot be changed after verification has been submitted.",
+            )
+        from app.domain.verification.nda import TUTOR_NDA_TEXT
+        verification.nda_version = settings.CURRENT_NDA_VERSION
+        verification.nda_content = TUTOR_NDA_TEXT
+        verification.nda_accepted_at = datetime.now(timezone.utc)
+        verification.nda_accepted_ip = client_ip
+        verification.nda_accepted_user_agent = (user_agent or "")[:500] or None
+        return await self.verifications.save(verification)
+
     async def submit(
         self,
         user: User,
         data: VerificationSubmission,
+        *,
+        client_ip: str | None = None,
+        user_agent: str | None = None,
     ) -> TutorVerification:
         self._require_tutor(user)
 
@@ -223,8 +258,15 @@ class VerificationService:
         now = datetime.now(timezone.utc)
 
         verification.identity_document_type = data.identity_document_type
-        verification.nda_version = settings.CURRENT_NDA_VERSION
-        verification.nda_accepted_at = now
+        if (
+            not verification.nda_accepted_at
+            or verification.nda_version != settings.CURRENT_NDA_VERSION
+            or not verification.nda_content
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Read and explicitly accept the current tutor NDA before submitting verification.",
+            )
         verification.submitted_at = now
         verification.status = VerificationStatus.PENDING_REVIEW
         verification.reviewed_by = None
@@ -254,7 +296,13 @@ class VerificationService:
     ) -> list[TutorVerification]:
         self._require_admin(admin)
 
-        return await self.verifications.list_pending(limit=max(1, min(limit, 100)))
+        records = await self.verifications.list_pending(limit=max(1, min(limit, 100)))
+        from app.core.cloudinary_service import get_tutor_video_url
+        for record in records:
+            record.introduction_video_url = get_tutor_video_url(
+                record.introduction_video_key
+            )
+        return records
 
     async def review(
         self,

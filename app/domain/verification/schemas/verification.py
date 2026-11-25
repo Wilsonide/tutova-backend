@@ -28,6 +28,9 @@ class VerificationStatusResponse(BaseModel):
     status: VerificationStatus
     nda_version: str | None
     nda_accepted_at: datetime | None
+    nda_content: str | None = None
+    nda_accepted_ip: str | None = None
+    nda_accepted_user_agent: str | None = None
     submitted_at: datetime | None
     reviewed_at: datetime | None
     review_notes: str | None
@@ -36,6 +39,7 @@ class VerificationStatusResponse(BaseModel):
 class AdminVerificationResponse(VerificationStatusResponse):
     tutor_user_id: uuid.UUID
     identity_document_type: str | None
+    introduction_video_url: str | None = None
     safeguarding_review_required: bool
     safeguarding_review_reasons: list[str]
     safeguarding_reviewed_by: uuid.UUID | None
@@ -47,3 +51,7 @@ class VerificationReviewRequest(BaseModel):
     decision: Literal["APPROVED", "REJECTED", "CHANGES_REQUESTED"]
     review_notes: str | None = Field(default=None, max_length=3000)
 
+
+
+class NdaAcceptanceRequest(BaseModel):
+    version: str = Field(min_length=1, max_length=50)

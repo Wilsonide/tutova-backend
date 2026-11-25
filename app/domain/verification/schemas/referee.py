@@ -161,6 +161,8 @@ class TutorRefereeResponse(BaseModel):
 
 
 class AdminTutorRefereeResponse(TutorRefereeResponse):
+    consented_name: str | None = None
+    consent_statement: str | None = None
     reference_response: dict | None = None
     reference_ip_address: str | None = None
     safeguarding_review_required: bool

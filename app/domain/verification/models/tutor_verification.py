@@ -73,6 +73,10 @@ class TutorVerification(Base, UUIDPrimaryKeyMixin, TimestampMixin):
         DateTime(timezone=True),
         nullable=True,
     )
+    # Immutable text snapshot of the exact agreement accepted by this tutor.
+    nda_content: Mapped[str | None] = mapped_column(Text, nullable=True)
+    nda_accepted_ip: Mapped[str | None] = mapped_column(String(45), nullable=True)
+    nda_accepted_user_agent: Mapped[str | None] = mapped_column(String(500), nullable=True)
 
     introduction_video_key: Mapped[str | None] = mapped_column(
         String(500),
