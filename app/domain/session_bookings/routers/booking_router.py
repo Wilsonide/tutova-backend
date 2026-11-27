@@ -80,6 +80,20 @@ async def list_my_bookings(
     )
 
 
+@router.get("/admin", response_model=list[BookingResponse])
+async def list_all_bookings(
+    _: RequireBookingAdmin,
+    db: DBSession,
+    limit: int = Query(default=100, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+):
+    from sqlalchemy import select
+    from app.domain.session_bookings.models.lesson_booking import LessonBooking
+    return list((await db.scalars(
+        select(LessonBooking).order_by(LessonBooking.start_at.desc()).limit(limit).offset(offset)
+    )).all())
+
+
 # =====================================================
 # GET BOOKING - AUTHENTICATED USERS
 # =====================================================
@@ -266,20 +280,6 @@ async def dispute_completion(
         booking_id,
         payload.reason,
     )
-
-
-@router.get("/admin", response_model=list[BookingResponse])
-async def list_all_bookings(
-    _: RequireBookingAdmin,
-    db: DBSession,
-    limit: int = Query(default=100, ge=1, le=500),
-    offset: int = Query(default=0, ge=0),
-):
-    from sqlalchemy import select
-    from app.domain.session_bookings.models.lesson_booking import LessonBooking
-    return list((await db.scalars(
-        select(LessonBooking).order_by(LessonBooking.start_at.desc()).limit(limit).offset(offset)
-    )).all())
 
 
 @router.post("/admin/{booking_id}/resolve-dispute", response_model=BookingResponse)

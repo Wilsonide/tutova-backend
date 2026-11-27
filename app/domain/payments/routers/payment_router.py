@@ -1,7 +1,15 @@
 import uuid
 from datetime import date
 
-from fastapi import APIRouter, BackgroundTasks, Header, HTTPException, Query, Request, status
+from fastapi import (
+    APIRouter,
+    BackgroundTasks,
+    Header,
+    HTTPException,
+    Query,
+    Request,
+    status,
+)
 from pydantic import BaseModel, Field
 from sqlalchemy import or_, select
 
@@ -269,6 +277,14 @@ async def list_all_refunds(_: RequireBookingAdmin, db: DBSession):
 @router.post("/admin/refunds/{refund_id}/verify", response_model=RefundResponse)
 async def verify_refund(refund_id: uuid.UUID, _: RequireBookingAdmin, db: DBSession):
     return await PaymentService(db).verify_refund(refund_id)
+
+
+@router.get("/admin", response_model=list[PaymentResponse])
+async def list_all_payments(_: RequireBookingAdmin, db: DBSession):
+    """Return payment records for administrator request and payment oversight."""
+    return list(
+        (await db.scalars(select(Payment).order_by(Payment.created_at.desc()))).all()
+    )
 
 
 @router.get("/{payment_id}", response_model=PaymentResponse)
