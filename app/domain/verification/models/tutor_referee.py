@@ -35,6 +35,14 @@ class TutorReferee(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     tutor_user_id: Mapped[uuid.UUID] = mapped_column(
         Uuid(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
     )
+    # Links a replacement invitation to the prior referee record without
+    # overwriting any previously submitted consent/reference response.
+    supersedes_referee_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("tutor_referees.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
     full_name: Mapped[str] = mapped_column(String(160), nullable=False)
     email: Mapped[str] = mapped_column(String(320), nullable=False)
     job_title: Mapped[str] = mapped_column(String(160), nullable=False)

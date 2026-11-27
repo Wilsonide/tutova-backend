@@ -25,6 +25,7 @@ from app.domain.verification.schemas.referee import (
     AdminTutorRefereeResponse,
     RefereeConsentPageResponse,
     RefereeConsentSubmission,
+    TutorRefereeEmailUpdateRequest,
     TutorRefereeInviteRequest,
     TutorRefereeResponse,
 )
@@ -115,9 +116,15 @@ class RefereeService:
         submitted_emails = {
             str(item.email).strip().lower() for item in payload.referees
         }
+        superseded_ids = {
+            referee.supersedes_referee_id
+            for referee in existing
+            if referee.supersedes_referee_id is not None
+        }
         if any(
             referee.status == RefereeStatus.CONSENTED
             and referee.email not in submitted_emails
+            and referee.id not in superseded_ids
             for referee in existing
         ):
             raise HTTPException(
@@ -179,6 +186,8 @@ class RefereeService:
             if (
                 referee.email.lower() not in submitted_emails
                 and referee.status != RefereeStatus.CONSENTED
+                and referee.id not in superseded_ids
+                and referee.responded_at is None
             ):
                 await self.db.delete(referee)
 
@@ -213,6 +222,119 @@ class RefereeService:
             TutorRefereeResponse.model_validate(item)
             for item in await self.repository.list_for_tutor(tutor.id)
         ]
+
+    async def update_referee_email(
+        self,
+        tutor: User,
+        referee_id: uuid.UUID,
+        payload: TutorRefereeEmailUpdateRequest,
+    ) -> TutorRefereeResponse:
+        """Correct a referee address without resubmitting the verification application.
+
+        Unanswered invitations are updated in place and their old token is
+        invalidated. Once a referee has responded, the response is immutable:
+        a new invitation row is created and linked to the historical row.
+        """
+        self._require_tutor(tutor)
+        if not all((settings.SMTP_HOST, settings.SMTP_FROM_EMAIL)):
+            raise HTTPException(
+                status_code=503,
+                detail="Referee email delivery is not configured. Set SMTP_HOST and SMTP_FROM_EMAIL before sending invitations.",
+            )
+
+        referee = await self.repository.get_for_tutor(referee_id, tutor.id)
+        if referee is None:
+            raise HTTPException(status_code=404, detail="Referee record not found.")
+
+        new_email = str(payload.email).strip().lower()
+        if new_email == referee.email.lower():
+            return TutorRefereeResponse.model_validate(referee)
+
+        conflicting = await self.repository.get_by_email_for_tutor(new_email, tutor.id)
+        if conflicting is not None and conflicting.id != referee.id:
+            # A previous attempt may have created the replacement record but
+            # failed while sending SMTP. Reuse that same pending record on retry.
+            if not (
+                conflicting.supersedes_referee_id == referee.id
+                and conflicting.status in {RefereeStatus.PENDING, RefereeStatus.EXPIRED}
+            ):
+                raise HTTPException(
+                    status_code=409,
+                    detail="This email address is already assigned to another referee record.",
+                )
+
+        now = datetime.now(timezone.utc)
+        raw_token = secrets.token_urlsafe(36)
+        token_hash = self._token_hash(raw_token)
+
+        if conflicting is not None and conflicting.id != referee.id:
+            invitation = conflicting
+            invitation.consent_token_hash = token_hash
+            invitation.token_expires_at = now + timedelta(days=7)
+            invitation.invitation_sent_at = None
+            invitation.status = RefereeStatus.PENDING
+        elif referee.status in {RefereeStatus.PENDING, RefereeStatus.EXPIRED}:
+            # The same person has not submitted a response, so safely correct
+            # the address on this invitation and invalidate the previous link.
+            referee.email = new_email
+            referee.consent_token_hash = token_hash
+            referee.token_expires_at = now + timedelta(days=7)
+            referee.invitation_sent_at = None
+            referee.status = RefereeStatus.PENDING
+            invitation = referee
+        else:
+            # A consented/declined response is immutable audit evidence.
+            # Create a new row so the replacement referee must respond afresh.
+            invitation = TutorReferee(
+                tutor_user_id=tutor.id,
+                full_name=referee.full_name,
+                email=new_email,
+                job_title=referee.job_title,
+                relationship_to_tutor=referee.relationship_to_tutor,
+                supersedes_referee_id=referee.id,
+                consent_token_hash=token_hash,
+                token_expires_at=now + timedelta(days=7),
+                status=RefereeStatus.PENDING,
+            )
+            self.db.add(invitation)
+
+        # A replacement referee must be reviewed before an existing approval
+        # can remain valid. Do not alter any submitted referee response.
+        verification = await self.verifications.get_by_tutor_for_update(tutor.id)
+        if verification is not None and verification.status == VerificationStatus.APPROVED:
+            verification.status = VerificationStatus.PENDING_REVIEW
+            verification.reviewed_by = None
+            verification.reviewed_at = None
+            verification.approved_at = None
+            verification.review_notes = None
+
+        await self.db.commit()
+        await self.db.refresh(invitation)
+
+        tutor_name = f"{tutor.first_name} {tutor.last_name}".strip()
+        link = f"{settings.FRONTEND_BASE_URL.rstrip('/')}/referee-consent/{raw_token}"
+        try:
+            await asyncio.to_thread(
+                self._send_email_sync,
+                recipient=invitation.email,
+                referee_name=invitation.full_name,
+                referee_job_title=invitation.job_title,
+                tutor_name=tutor_name,
+                link=link,
+            )
+            invitation.invitation_sent_at = datetime.now(timezone.utc)
+            await self.db.commit()
+            await self.db.refresh(invitation)
+        except Exception as exc:
+            # Keep the new pending record/token so the tutor can retry through
+            # the same correction action without losing the audit trail.
+            await self.db.commit()
+            raise HTTPException(
+                status_code=502,
+                detail="The referee email address was updated, but the invitation email could not be delivered. Please retry the email correction.",
+            ) from exc
+
+        return TutorRefereeResponse.model_validate(invitation)
 
     async def _mark_expired(self, referees: list[TutorReferee]) -> None:
         now = datetime.now(timezone.utc)

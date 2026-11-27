@@ -23,6 +23,7 @@ from app.domain.verification.schemas.referee import (
     RefereeConsentPageResponse,
     RefereeConsentSubmission,
     AdminTutorRefereeResponse,
+    TutorRefereeEmailUpdateRequest,
     TutorRefereeInviteRequest,
     TutorRefereeResponse,
     SafeguardingReviewRequest,
@@ -53,6 +54,21 @@ async def invite_tutor_referees(
     db: DBSession,
 ):
     return await RefereeService(db).invite(current_user, payload)
+
+
+@router.patch(
+    "/tutor/referees/{referee_id}/email",
+    response_model=TutorRefereeResponse,
+)
+async def update_tutor_referee_email(
+    referee_id: uuid.UUID,
+    payload: TutorRefereeEmailUpdateRequest,
+    current_user: RequireTutor,
+    db: DBSession,
+):
+    return await RefereeService(db).update_referee_email(
+        current_user, referee_id, payload
+    )
 
 
 @router.get("/tutor/referees", response_model=list[TutorRefereeResponse])

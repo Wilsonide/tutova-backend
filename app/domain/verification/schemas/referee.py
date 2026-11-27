@@ -134,6 +134,10 @@ class RefereeInput(BaseModel):
     relationship_to_tutor: str = Field(min_length=2, max_length=100)
 
 
+class TutorRefereeEmailUpdateRequest(BaseModel):
+    email: EmailStr
+
+
 class TutorRefereeInviteRequest(BaseModel):
     referees: list[RefereeInput] = Field(min_length=2)
 
@@ -149,6 +153,7 @@ class TutorRefereeResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: uuid.UUID
+    supersedes_referee_id: uuid.UUID | None = None
     full_name: str
     email: EmailStr
     job_title: str
